@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod parameters;
 pub mod tile;
 
+pub use parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
 pub use tile::{TileId, TileIdParseError};
