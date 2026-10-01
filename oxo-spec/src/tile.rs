@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 
 /// A 1x1 degree tile, identified by the integer latitude and longitude of
 /// its south-west corner.
@@ -96,6 +97,60 @@ impl fmt::Display for TileId {
     }
 }
 
+impl FromStr for TileId {
+    type Err = TileIdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = s.as_bytes();
+        if bytes.len() != 7 {
+            return Err(TileIdParseError::WrongLength {
+                got: s.chars().count(),
+            });
+        }
+        let lat_sign = match bytes[0] {
+            b'+' => 1i32,
+            b'-' => -1i32,
+            _ => return Err(TileIdParseError::MissingLatSign),
+        };
+        let lon_sign = match bytes[3] {
+            b'+' => 1i32,
+            b'-' => -1i32,
+            _ => return Err(TileIdParseError::MissingLonSign),
+        };
+
+        let lat = read_digits(&bytes[1..3], 1)? * lat_sign;
+        let lon = read_digits(&bytes[4..7], 4)? * lon_sign;
+
+        if !(i32::from(Self::LAT_MIN)..=i32::from(Self::LAT_MAX)).contains(&lat) {
+            return Err(TileIdParseError::LatOutOfRange { lat });
+        }
+        if !(i32::from(Self::LON_MIN)..=i32::from(Self::LON_MAX)).contains(&lon) {
+            return Err(TileIdParseError::LonOutOfRange { lon });
+        }
+
+        Ok(Self {
+            lat: lat as i8,
+            lon: lon as i16,
+        })
+    }
+}
+
+/// Read `bytes` as a run of ASCII digits, reporting the absolute position
+/// of the first offender. `offset` is where `bytes` starts in the whole
+/// identifier, so error positions are meaningful to a reader.
+fn read_digits(bytes: &[u8], offset: usize) -> Result<i32, TileIdParseError> {
+    let mut value = 0i32;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if !byte.is_ascii_digit() {
+            return Err(TileIdParseError::NonDigit {
+                position: offset + index,
+            });
+        }
+        value = value * 10 + i32::from(byte - b'0');
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +168,54 @@ mod tests {
         assert_eq!(
             TileId::new(50, -2).unwrap().tile_dir_name(),
             "zOrtho4XP_+50-002"
+        );
+    }
+
+    #[test]
+    fn canonical_form_round_trips_across_the_entire_valid_range() {
+        for lat in TileId::LAT_MIN..=TileId::LAT_MAX {
+            for lon in TileId::LON_MIN..=TileId::LON_MAX {
+                let tile = TileId::new(lat, lon).expect("in range");
+                let text = tile.to_string();
+                assert_eq!(text.len(), 7, "{text} is not 7 characters");
+                assert_eq!(text.parse::<TileId>().expect("round trip"), tile);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_coordinates_outside_the_range() {
+        assert_eq!(
+            TileId::new(90, 0),
+            Err(TileIdParseError::LatOutOfRange { lat: 90 })
+        );
+        assert_eq!(
+            TileId::new(0, 180),
+            Err(TileIdParseError::LonOutOfRange { lon: 180 })
+        );
+        assert_eq!(
+            "+90+000".parse::<TileId>(),
+            Err(TileIdParseError::LatOutOfRange { lat: 90 })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_strings() {
+        assert_eq!(
+            "+50-02".parse::<TileId>(),
+            Err(TileIdParseError::WrongLength { got: 6 })
+        );
+        assert_eq!(
+            "50-002x".parse::<TileId>(),
+            Err(TileIdParseError::MissingLatSign)
+        );
+        assert_eq!(
+            "+50x002".parse::<TileId>(),
+            Err(TileIdParseError::MissingLonSign)
+        );
+        assert_eq!(
+            "+5a-002".parse::<TileId>(),
+            Err(TileIdParseError::NonDigit { position: 2 })
         );
     }
 }
