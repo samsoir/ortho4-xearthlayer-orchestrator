@@ -5,6 +5,9 @@ The system-level architecture for the Ortho4 XEarthLayer Orchestrator
 inherits. `README.md` states the problem and the three production
 phases; this document fixes the execution model, the component
 boundaries and the decomposition, and does not restate the README.
+v1 covers phases 1 and 2 -- specification and production. Phase 3,
+compiling and publishing a regional package, stays with the operator
+and their existing tooling.
 
 It is the source of truth for architecture and decisions. Sub-project
 designs under `docs/specs/` refine it; where one contradicts this
@@ -14,8 +17,9 @@ silently diverged from.
 ## Goal
 
 A control plane that takes a validated region specification and drives
-it to a complete set of produced 1x1 degree tiles without manual
-orchestration, surviving the failure modes that make the manual
+it to a complete set of produced 1x1 degree ortho tiles and overlays
+in a configured target location, without manual orchestration,
+surviving the failure modes that make the manual
 process expensive: memory and disk exhaustion, network failure, host
 restarts and operating system updates.
 
@@ -23,6 +27,9 @@ Success:
 
 - A region specification is submitted once and reaches completion
   without an operator dispatching individual tiles.
+- The output is a complete set of ortho tiles and overlays satisfying
+  the specification, in the configured target location, ready for the
+  operator's existing packaging tools.
 - A tile that fails is retried under a declared policy, and a tile
   that exhausts its retries is reported rather than silently dropped.
 - The control plane restarting loses no job state.
@@ -75,7 +82,7 @@ the unit of execution is a pod spec, which both runtimes consume.
    └─────┬──────┘                                 └────────────┘
          │
          ├── scratch    ephemeral, wiped on cleanup
-         ├── artifacts  durable, egress target, read by publish
+         ├── artifacts  durable, egress target — the v1 deliverable
          └── dem-cache  persistent, shared between pods
 ```
 
@@ -130,7 +137,7 @@ differ in their unit files, not in OXO.
 
 OXO does own the **throughput signal** -- queue depth, claim rate,
 completion rate, failure rate -- and must be able to express a desired
-worker count. Nothing acts on it in v1. It is a seam, kept open so
+worker count. Nothing acts on it in v1. It is a boundary, kept open so
 that scaling automation is additive later: such automation reads
 throughput from OXO and either actuates the platform itself or
 publishes a desired state for the platform to converge on.
@@ -140,13 +147,13 @@ publishes a desired state for the platform to converge on.
 | Volume | Lifetime | Contents |
 |---|---|---|
 | `scratch` | Ephemeral, per pod | All intermediate work. Wiped wholesale on cleanup. |
-| `artifacts` | Durable | Finished ortho and overlay tiles. The egress target, and what the compilation phase reads. |
+| `artifacts` | Durable | Finished ortho and overlay tiles. The egress target and the v1 deliverable: the operator points existing packaging tools at it. |
 | `dem-cache` | Persistent, shared | Elevation data, which covers more area than one 1x1 degree tile and is therefore worth retaining across jobs and pods. |
 
 Working on scratch rather than directly on the durable volume keeps
 Ortho4XP's heavy intermediate I/O local, makes cleanup trivially
 correct, and means a crashed pod cannot leave partial state in the
-tree the publisher reads.
+tree the operator's packaging tools read.
 
 The DEM cache is the one deliberate exception to "nothing survives a
 pod". It buys real time across a region, and it costs OXO a cache
@@ -200,11 +207,10 @@ boundaries that principle produces here.
 
 | Component | Responsibility | Depends on |
 |---|---|---|
-| Region spec | Model, authoring, validation of a region and its tile enumeration | Nothing |
+| Region spec | Model and validation of a region: metadata, its explicit set of 1x1 degree tiles, and production parameters | Nothing |
 | Job server | Durable job state, lease/claim/heartbeat/expiry, retry accounting, region-completion gate | A persistence adapter |
 | Control plane | Atomize a spec into jobs, serve the claim API, own the pod spec, inject config, expose throughput | Region spec, job-server port |
 | Worker pod | Self-init, capacity check, tile production, egress, cleanup, recycle/stop | Injected config, OXO API |
-| Compilation | Invoke `xearthlayer-publish` once a region's gate opens | Job server (gate), artifacts volume |
 
 **The job-server role is separated from the control plane by an
 explicit port.** Queue persistence is a trait with lease, claim, retry
@@ -224,15 +230,18 @@ tests a far better surface than a broker protocol.
 | Runtime constraint | Containers under Podman or Kubernetes, homogeneous | Holds for local and cloud alike; the only constraint worth designing against |
 | Unit of execution | A pod spec owned by the control plane | Portable across both runtimes without a second code path |
 | Configuration ownership | Injected at pod start; pods carry none | Configuration drift between workers becomes unrepresentable rather than merely discouraged |
+| Region definition | The specification takes an explicit set of 1x1 degree tiles | How a human composes that set is a UX concern, specified separately with the web interface; the model must not be shaped by its authoring tool |
+| v1 deliverable | A complete ortho and overlay tile set in a target location | Packaging and publishing stay with the operator's existing tooling; even this much is a large improvement on the manual process |
 | Dispatch | Pull — pods claim tiles | Makes recycle mode coherent; puts capacity assessment where it can be measured |
 | Pod lifecycle management | The platform's, not OXO's | Conforms to the "no bespoke compute platform" non-goal; local and cloud differ in unit files only |
-| Scaling automation | Out of scope for v1; throughput signal kept as a seam | Additive later; building it now is unjustified |
-| Work location | Ephemeral scratch, egress to durable volume | Local intermediate I/O; wholesale cleanup; no partial state in the published tree |
+| Scaling automation | Out of scope for v1; throughput signal kept as a contract | Additive later; building it now is unjustified |
+| Work location | Ephemeral scratch, egress to durable volume | Local intermediate I/O; wholesale cleanup; no partial state in the delivered tree |
 | DEM cache | Persistent and shared across pods | Elevation data spans more than one tile, so re-downloading per job is pure waste |
 | Execution mode | Recycle or stop, per configuration | The README's container-lifetime tension is a parameter, not a design choice |
-| Job substrate | Postgres behind a job-server port | Specs, the completion gate, incremental production and throughput are all queries; one store beats a store plus a broker |
+| Job substrate | Postgres behind a job-server port | Specs, the completion gate and throughput are all queries; one store beats a store plus a broker |
 | Failure detection | Artifacts and output markers | Ortho4XP's headless path exits 0 on every failure |
 | Spec convention | `docs/specs/YYYY-MM-DD-<topic>-design.md`, plans in `docs/plans/` | Matches the author's established convention across sibling projects |
+| End user documentation | Lives in `docs/`, completed once the function is completed to provide end users guidance on functionality. | End user docs must be written only when the api and ux are stable. |
 
 ## Decomposition into sub-projects
 
@@ -243,29 +252,27 @@ implementation cycle.
 | # | Sub-project | Scope |
 |---|---|---|
 | 0 | *(spike)* Ortho4XP pod contract | One tile built headless in a container. Measured peak scratch, memory and wall-clock. Exit and failure taxonomy. What configuration must be injected. What the DEM cache actually saves. Output is numbers and an answer; anything built is throwaway. |
-| 1 | Region spec: model, authoring, validation | Specification data model, tile enumeration, validation rules, CLI. Pure library: no persistence, no runtime, no network. |
+| 1 | Region spec: model and validation | Specification data model over an explicit set of 1x1 degree tiles, plus metadata, production parameters and validation rules, with a CLI. Pure library: no persistence, no runtime, no network. |
 | 2 | Job server: port and Postgres adapter | Job lifecycle state machine, lease/heartbeat/expiry, retry policy and accounting, region-completion gate, Postgres adapter behind the port. |
 | 3 | Control plane: planner and claim API | Atomize a specification into per-tile jobs, serve claim/heartbeat/complete/fail, inject configuration, own the pod spec, expose the throughput signal. |
 | 4 | Ortho4XP worker pod | Image, self-initialization, capacity check, tile production, artifact egress, cleanup, recycle and stop modes. |
 | 5 | Observability and operator interface | Telemetry export, failure policy and alerting, operator views in HTML5/CSS/JS to WCAG principles. |
-| 6 | Compilation | `xearthlayer-publish` invocation behind the completion gate. Deferred by the README. |
 
 Sequence: this document, then sub-project 1. Spike 0 is deferred
 rather than dropped -- its numbers are needed before the resource
 model in sub-projects 2 through 4 can be more than a guess.
 
+Compilation is not a sub-project. A run ends when the artifacts are
+in place and the region's completion gate reports done; packaging and
+publishing are the operator's, using the tooling they already have.
+
+One further document is known to be needed and is not a sub-project
+here: a specification for **tile-set authoring UX**, covering broad
+selection methods such as bounding areas. It belongs with the web
+interface.
+
 ## Open decisions
 
-- **Tile enumeration authoring.** The README defines a region as an
-  enumeration of every 1x1 degree tile. Hand-listing a continent is
-  not practical, so enumeration needs generating from bounds plus a
-  landmass or coverage filter, with explicit inclusions and
-  exclusions. The shape of that is sub-project 1's central question.
-- **Incremental production.** Regional packages already exist and
-  carry versions, so production must be able to target gaps and
-  additions against a published region rather than only greenfield
-  regions. Where that belongs -- specification, planner, or both --
-  is unresolved.
 - **Per-tile resource estimation.** Admission control needs an
   expected footprint per tile, presumably a function of zoom level,
   provider and whether overlays are included. Spike 0 supplies the
@@ -286,8 +293,20 @@ model in sub-projects 2 through 4 can be more than a guess.
 
 ## Out of scope
 
-- Publishing functions, per the README. Sub-project 6 covers
-  invocation of `xearthlayer-publish` only.
+- **Packaging and publishing.** v1 delivers tiles and overlays to a
+  target location. Creating and releasing regional scenery packages
+  with `xearthlayer-publish` stays with the operator and the tooling
+  they already have. OXO does not invoke it.
+- **Incremental production.** v1 produces the complete set its
+  specification names. Targeting only gaps or additions against an
+  already-published region is deferred sophistication, not a v1
+  requirement.
+- **Tile-set authoring UX.** The specification consumes an explicit
+  set of tiles. Broad selection methods -- bounding areas and similar
+  -- belong to the web interface and get their own specification.
+  Composing large sets in Ortho4XP today takes thousands of mouse
+  clicks and is error-prone, which is the problem that document will
+  address; it is not a reason to complicate the specification model.
 - Scaling automation and any OXO-held container runtime credentials.
 - A Kubernetes operator. Compatibility is preserved; the operator is
   not built.
@@ -328,10 +347,10 @@ substantial operational weight, and a poor fit for pull-based Python
 worker pods, which are not Temporal workers and would need a shim.
 
 **Working directly on the durable volume.** No egress step, and
-nothing can be lost between production and publish. Rejected:
+nothing can be lost between production and packaging. Rejected:
 Ortho4XP's intermediate I/O would cross the network, cleanup would
 have to be surgical rather than wholesale, and a crashed pod would
-leave partial state where the publisher reads.
+leave partial state where the operator's tooling reads.
 
 **Scratch and egress with no persistent cache.** Cleaner accounting
 and a genuinely stateless pod. Rejected: elevation data covers more
@@ -348,9 +367,11 @@ than one tile, so this re-downloads it for every job in a region.
   injected configuration. Public servers rate-limit and truncate
   under load, which is a recorded cause of build failure; the
   configuration must be able to name several.
-- **`xearthlayer-publish`** -- regional package compilation. Reads
-  Ortho4XP output from a POSIX path, which is what fixes the
-  artifacts volume as a filesystem rather than an object store.
+- **`xearthlayer-publish`** -- not invoked by OXO, and not a runtime
+  dependency. It is the operator's tool for the packaging step that
+  follows a run, and it reads Ortho4XP output from a POSIX path --
+  which is what fixes the artifacts volume as a filesystem rather
+  than an object store.
 - **PostgreSQL** -- the v1 job-server adapter. A deployment
   dependency, not a design one.
 
