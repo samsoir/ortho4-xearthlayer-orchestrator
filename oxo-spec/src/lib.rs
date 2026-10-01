@@ -14,6 +14,7 @@ pub mod policy;
 pub mod raw;
 pub mod target;
 pub mod tile;
+pub mod validate;
 
 pub use metadata::Metadata;
 pub use parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
@@ -21,3 +22,4 @@ pub use policy::FailurePolicy;
 pub use raw::RawRegionSpec;
 pub use target::TargetLocation;
 pub use tile::{TileId, TileIdParseError};
+pub use validate::{ValidationError, ValidationReport};
