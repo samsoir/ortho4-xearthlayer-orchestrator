@@ -151,6 +151,25 @@ fn read_digits(bytes: &[u8], offset: usize) -> Result<i32, TileIdParseError> {
     Ok(value)
 }
 
+impl serde::Serialize for TileId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +235,24 @@ mod tests {
         assert_eq!(
             "+5a-002".parse::<TileId>(),
             Err(TileIdParseError::NonDigit { position: 2 })
+        );
+    }
+
+    #[test]
+    fn serialises_as_the_canonical_string() {
+        let tile = TileId::new(50, -2).unwrap();
+        let json = serde_json::to_string(&tile).expect("serialise");
+        assert_eq!(json, "\"+50-002\"");
+        let back: TileId = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back, tile);
+    }
+
+    #[test]
+    fn deserialising_a_bad_identifier_reports_why() {
+        let error = serde_json::from_str::<TileId>("\"nope\"").expect_err("should reject");
+        assert!(
+            error.to_string().contains("expected 7 characters"),
+            "unhelpful error: {error}"
         );
     }
 }
