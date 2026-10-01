@@ -1,7 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::parameters::{ZOOM_MAX, ZOOM_MIN};
-use crate::tile::TileIdParseError;
+use crate::tile::{TileId, TileIdParseError};
 
 /// A single static-validation fault.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +134,48 @@ impl fmt::Display for ValidationReport {
 
 impl std::error::Error for ValidationReport {}
 
+/// Validate the raw tile list, returning the tiles that parsed.
+///
+/// Counting distinct values first means a malformed identifier appearing
+/// twice yields one `InvalidTileId` and one `DuplicateTile`, rather than
+/// two of the former. Iterating a `BTreeMap` also makes fault order
+/// deterministic, which matters for testing and for diffable output.
+#[allow(dead_code)]
+pub(crate) fn validate_tiles(
+    raw: &[String],
+    errors: &mut Vec<ValidationError>,
+) -> BTreeSet<TileId> {
+    if raw.is_empty() {
+        errors.push(ValidationError::EmptyTileSet);
+    }
+
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for value in raw {
+        *counts.entry(value.as_str()).or_insert(0) += 1;
+    }
+
+    let mut tiles = BTreeSet::new();
+    for (value, occurrences) in counts {
+        if occurrences > 1 {
+            errors.push(ValidationError::DuplicateTile {
+                value: value.to_string(),
+                occurrences,
+            });
+        }
+        match value.parse::<TileId>() {
+            Ok(tile) => {
+                tiles.insert(tile);
+            }
+            Err(reason) => errors.push(ValidationError::InvalidTileId {
+                value: value.to_string(),
+                reason,
+            }),
+        }
+    }
+
+    tiles
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +210,92 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("default_zl"), "{rendered}");
         assert!(rendered.contains("zoom"), "{rendered}");
+    }
+
+    #[test]
+    fn an_empty_tile_list_is_a_fault() {
+        let mut errors = Vec::new();
+        let tiles = validate_tiles(&[], &mut errors);
+        assert!(tiles.is_empty());
+        assert_eq!(errors, vec![ValidationError::EmptyTileSet]);
+    }
+
+    #[test]
+    fn good_tiles_are_collected_and_ordered() {
+        let mut errors = Vec::new();
+        let input = vec!["+51-002".to_string(), "+50-002".to_string()];
+        let tiles = validate_tiles(&input, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        let ordered: Vec<String> = tiles.iter().map(ToString::to_string).collect();
+        assert_eq!(ordered, vec!["+50-002", "+51-002"]);
+    }
+
+    #[test]
+    fn a_duplicate_tile_is_a_fault_and_is_not_silently_collapsed() {
+        let mut errors = Vec::new();
+        let input = vec!["+50-002".to_string(), "+50-002".to_string()];
+        let tiles = validate_tiles(&input, &mut errors);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(
+            errors,
+            vec![ValidationError::DuplicateTile {
+                value: "+50-002".to_string(),
+                occurrences: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_malformed_tile_is_reported_once_per_distinct_value() {
+        let mut errors = Vec::new();
+        let input = vec![
+            "nope".to_string(),
+            "nope".to_string(),
+            "+91+000".to_string(),
+        ];
+        let tiles = validate_tiles(&input, &mut errors);
+        assert!(tiles.is_empty());
+        let invalid: Vec<&ValidationError> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InvalidTileId { .. }))
+            .collect();
+        assert_eq!(invalid.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn faults_are_ordered_and_a_tile_can_be_both_malformed_and_duplicated() {
+        let mut errors = Vec::new();
+        let input = vec![
+            "nope".to_string(),
+            "nope".to_string(),
+            "+50-002".to_string(),
+            "bad".to_string(),
+        ];
+        let tiles = validate_tiles(&input, &mut errors);
+
+        // The one well-formed tile still lands in the returned set.
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles.iter().next().unwrap().to_string(), "+50-002");
+
+        // Faults come back in deterministic order (BTreeMap over distinct
+        // values), and "nope" yields ONE DuplicateTile plus ONE
+        // InvalidTileId rather than two of either.
+        assert_eq!(
+            errors,
+            vec![
+                ValidationError::InvalidTileId {
+                    value: "bad".to_string(),
+                    reason: TileIdParseError::WrongLength { got: 3 },
+                },
+                ValidationError::DuplicateTile {
+                    value: "nope".to_string(),
+                    occurrences: 2,
+                },
+                ValidationError::InvalidTileId {
+                    value: "nope".to_string(),
+                    reason: TileIdParseError::WrongLength { got: 4 },
+                },
+            ]
+        );
     }
 }
