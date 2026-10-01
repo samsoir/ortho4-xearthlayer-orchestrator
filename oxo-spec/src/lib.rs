@@ -7,3 +7,7 @@
 //! control plane, not here.
 
 #![forbid(unsafe_code)]
+
+pub mod tile;
+
+pub use tile::{TileId, TileIdParseError};
