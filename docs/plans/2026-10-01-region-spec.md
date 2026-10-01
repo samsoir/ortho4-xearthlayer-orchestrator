@@ -694,8 +694,9 @@ pub const ZOOM_MAX: u8 = 20;
 /// `include_overlays` has no entry, because overlay generation is not an
 /// Ortho4XP tile-configuration key at all: `Ortho4XP.py` never builds
 /// overlays, and `O4_Tile_Utils.build_tile_list` gates them on a `do_ovl`
-/// function argument. The flag therefore selects worker behaviour, not
-/// Ortho4XP configuration, and has nothing to collide with.
+/// function argument. The flag decides whether the planner emits overlay
+/// jobs for this region's tiles, so it is not Ortho4XP configuration and
+/// has nothing to collide with.
 pub const RESERVED_RAW_KEYS: &[(&str, &str)] =
     &[("default_website", "provider"), ("default_zl", "zoom")];
 
@@ -712,7 +713,9 @@ pub struct ProductionParameters {
     pub provider: String,
     /// Imagery zoom level. Mapped to `default_zl`.
     pub zoom: u8,
-    /// Whether the worker also builds overlays for each tile.
+    /// Whether the planner also emits an overlay job for each tile.
+    /// `false` yields ortho jobs only, which is a supported choice rather
+    /// than a degraded mode.
     #[serde(default)]
     pub include_overlays: bool,
     /// Ortho4XP tile-configuration keys passed through untouched, so that
