@@ -3283,7 +3283,7 @@ pg-up: ## Start a disposable PostgreSQL for the adapter tests
 	for i in $$(seq 1 60); do \
 	  if podman exec $(PG_TEST_CONTAINER) pg_isready -q -U postgres 2>/dev/null; then echo ' ready'; exit 0; fi; \
 	  printf '.'; sleep 1; \
-	done; echo ' timed out'; exit 1
+	done; echo ' timed out'; podman rm -f $(PG_TEST_CONTAINER) >/dev/null 2>&1 || true; exit 1
 
 .PHONY: pg-down
 pg-down: ## Remove the disposable PostgreSQL
@@ -3315,7 +3315,11 @@ Create `oxo-tasks-postgres/migrations/0001_tasks.sql`:
 CREATE TABLE jobs (
     id           uuid        PRIMARY KEY,
     region_code  text        NOT NULL,
-    revision     integer     NOT NULL,
+    -- A u32 in Rust. Without this CHECK an out-of-range revision casts to a
+    -- negative i32 and inserts silently, corrupting the identity that the
+    -- UNIQUE below is meant to protect. The other numeric columns are already
+    -- covered by their own lower bounds.
+    revision     integer     NOT NULL CHECK (revision >= 1),
     -- Snapshotted from the specification's failure policy, so editing a
     -- specification cannot change the policy of a job already in flight.
     max_attempts integer     NOT NULL CHECK (max_attempts >= 1),
@@ -3343,6 +3347,7 @@ CREATE TABLE tasks (
     CONSTRAINT lease_matches_state CHECK (
         (state = 'claimed') = (lease_token IS NOT NULL)
         AND (state = 'claimed') = (claimed_at IS NOT NULL)
+        AND (state = 'claimed') = (last_heartbeat_at IS NOT NULL)
     )
 );
 
@@ -3984,16 +3989,16 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
         // start that was already consumed at claim, abandoning when the
         // budget is gone and requeueing with backoff otherwise.
         let rows: Vec<(String,)> = sqlx::query_as(
-            "UPDATE tasks AS j SET \
-                 state = CASE WHEN j.attempts >= r.max_attempts THEN 'abandoned' ELSE 'pending' END, \
-                 claimable_at = CASE WHEN j.attempts >= r.max_attempts THEN j.claimable_at \
-                                     ELSE $1 + (r.backoff_secs * interval '1 second') END, \
+            "UPDATE tasks AS t SET \
+                 state = CASE WHEN t.attempts >= j.max_attempts THEN 'abandoned' ELSE 'pending' END, \
+                 claimable_at = CASE WHEN t.attempts >= j.max_attempts THEN t.claimable_at \
+                                     ELSE $1 + (j.backoff_secs * interval '1 second') END, \
                  lease_token = NULL, claimed_by = NULL, claimed_at = NULL, \
                  last_heartbeat_at = NULL \
-             FROM jobs AS r \
-             WHERE r.id = j.job_id AND j.state = 'claimed' \
-               AND (j.last_heartbeat_at < $2 OR j.claimed_at < $3) \
-             RETURNING j.state",
+             FROM jobs AS j \
+             WHERE j.id = t.job_id AND t.state = 'claimed' \
+               AND (t.last_heartbeat_at < $2 OR t.claimed_at < $3) \
+             RETURNING t.state",
         )
         .bind(now)
         .bind(heartbeat_cutoff)
