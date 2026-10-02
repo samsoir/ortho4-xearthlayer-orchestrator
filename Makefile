@@ -58,7 +58,7 @@ pg-up: ## Start a disposable PostgreSQL for the adapter tests
 	for i in $$(seq 1 60); do \
 	  if podman exec $(PG_TEST_CONTAINER) pg_isready -q -U postgres 2>/dev/null; then echo ' ready'; exit 0; fi; \
 	  printf '.'; sleep 1; \
-	done; echo ' timed out'; exit 1
+	done; echo ' timed out'; podman rm -f $(PG_TEST_CONTAINER) >/dev/null 2>&1 || true; exit 1
 
 .PHONY: pg-down
 pg-down: ## Remove the disposable PostgreSQL

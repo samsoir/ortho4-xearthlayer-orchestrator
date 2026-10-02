@@ -8,7 +8,11 @@
 CREATE TABLE jobs (
     id           uuid        PRIMARY KEY,
     region_code  text        NOT NULL,
-    revision     integer     NOT NULL,
+    -- A u32 in Rust. Without this CHECK an out-of-range revision casts to a
+    -- negative i32 and inserts silently, corrupting the identity that the
+    -- UNIQUE below is meant to protect. The other numeric columns are already
+    -- covered by their own lower bounds.
+    revision     integer     NOT NULL CHECK (revision >= 1),
     -- Snapshotted from the specification's failure policy, so editing a
     -- specification cannot change the policy of a job already in flight.
     max_attempts integer     NOT NULL CHECK (max_attempts >= 1),
@@ -36,6 +40,7 @@ CREATE TABLE tasks (
     CONSTRAINT lease_matches_state CHECK (
         (state = 'claimed') = (lease_token IS NOT NULL)
         AND (state = 'claimed') = (claimed_at IS NOT NULL)
+        AND (state = 'claimed') = (last_heartbeat_at IS NOT NULL)
     )
 );
 
