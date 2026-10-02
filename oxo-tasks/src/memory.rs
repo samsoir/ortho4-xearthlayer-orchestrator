@@ -109,11 +109,52 @@ impl State {
         }
         Ok(task)
     }
+
+    /// Count tasks per state for one job. Shared by the gate and the
+    /// throughput snapshot so the two cannot disagree.
+    fn tally(&self, job_id: JobId, now: DateTime<Utc>) -> Result<Tally, TaskStoreError> {
+        let job = self
+            .jobs
+            .get(&job_id)
+            .ok_or(TaskStoreError::UnknownJob { job_id })?;
+        let mut tally = Tally::default();
+        for id in &job.task_ids {
+            let task = &self.tasks[id];
+            match task.state {
+                TaskState::Pending => {
+                    tally.pending += 1;
+                    if task.claimable_at <= now {
+                        tally.claimable_now += 1;
+                    }
+                }
+                TaskState::Claimed => tally.claimed += 1,
+                TaskState::Succeeded => tally.succeeded += 1,
+                TaskState::Abandoned => tally.abandoned += 1,
+            }
+        }
+        Ok(tally)
+    }
+}
+
+#[derive(Debug, Default)]
+struct Tally {
+    pending: u32,
+    claimable_now: u32,
+    claimed: u32,
+    succeeded: u32,
+    abandoned: u32,
 }
 
 #[async_trait]
 impl TaskStore for InMemoryTaskStore {
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        if request.tasks.is_empty() {
+            return Err(TaskStoreError::EmptyJob {
+                region_code: request.region_code,
+                revision: request.revision,
+            });
+        }
+
         // Refuse a duplicated pair before anything else. Deduplicating would
         // make total_tasks disagree with the request, and would diverge from
         // the PostgreSQL adapter, whose unique constraint collapses it.
@@ -300,16 +341,94 @@ impl TaskStore for InMemoryTaskStore {
         })
     }
 
-    async fn reap_expired(&self, _request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
-        unimplemented!("Task 7")
+    async fn reap_expired(&self, request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
+        let now = self.clock.now();
+        let heartbeat_timeout = chrono::Duration::from_std(request.heartbeat_timeout)
+            .unwrap_or(chrono::Duration::zero());
+        let max_duration = chrono::Duration::from_std(request.max_task_duration)
+            .unwrap_or(chrono::Duration::zero());
+        let mut state = self.locked();
+
+        // Policies are read before any task is mutably borrowed.
+        let policies: BTreeMap<JobId, (u32, Duration)> = state
+            .jobs
+            .iter()
+            .map(|(id, job)| (*id, (job.max_attempts, job.backoff)))
+            .collect();
+
+        let expired: Vec<TaskId> = state
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.state == TaskState::Claimed)
+            .filter(|(_, task)| {
+                let heartbeat_lapsed = task
+                    .last_heartbeat_at
+                    .is_some_and(|last| now - last > heartbeat_timeout);
+                let held_too_long = task
+                    .claimed_at
+                    .is_some_and(|since| now - since > max_duration);
+                heartbeat_lapsed || held_too_long
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut outcome = ReapOutcome::default();
+        for task_id in expired {
+            let (max_attempts, backoff) = policies[&state.tasks[&task_id].job_id];
+            let task = state.tasks.get_mut(&task_id).expect("just selected");
+            task.lease = None;
+            task.claimed_by = None;
+            task.claimed_at = None;
+            task.last_heartbeat_at = None;
+
+            if task.attempts >= max_attempts {
+                task.state = TaskState::Abandoned;
+                outcome.abandoned += 1;
+            } else {
+                let step = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero());
+                task.state = TaskState::Pending;
+                task.claimable_at = now + step;
+                outcome.requeued += 1;
+            }
+        }
+
+        Ok(outcome)
     }
 
-    async fn job_status(&self, _job_id: JobId) -> Result<JobStatus, TaskStoreError> {
-        unimplemented!("Task 7")
+    async fn job_status(&self, job_id: JobId) -> Result<JobStatus, TaskStoreError> {
+        let now = self.clock.now();
+        let state = self.locked();
+        let tally = state.tally(job_id, now)?;
+
+        if tally.pending == 0 && tally.claimed == 0 {
+            return Ok(if tally.abandoned == 0 {
+                JobStatus::Complete
+            } else {
+                JobStatus::Failed {
+                    abandoned: tally.abandoned,
+                }
+            });
+        }
+
+        Ok(JobStatus::InProgress {
+            pending: tally.pending,
+            claimed: tally.claimed,
+            succeeded: tally.succeeded,
+            abandoned: tally.abandoned,
+        })
     }
 
-    async fn throughput(&self, _job_id: JobId) -> Result<Throughput, TaskStoreError> {
-        unimplemented!("Task 7")
+    async fn throughput(&self, job_id: JobId) -> Result<Throughput, TaskStoreError> {
+        let now = self.clock.now();
+        let state = self.locked();
+        let tally = state.tally(job_id, now)?;
+        Ok(Throughput {
+            pending: tally.pending,
+            claimable_now: tally.claimable_now,
+            claimed: tally.claimed,
+            succeeded: tally.succeeded,
+            abandoned: tally.abandoned,
+        })
     }
 }
 
@@ -644,6 +763,223 @@ mod tests {
             task_id: task.task_id,
             token: task.lease,
         }
+    }
+
+    fn reap(heartbeat_secs: u64, max_secs: u64) -> ReapRequest {
+        ReapRequest {
+            heartbeat_timeout: Duration::from_secs(heartbeat_secs),
+            max_task_duration: Duration::from_secs(max_secs),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_heartbeat_lapses_is_reclaimed_and_takes_backoff() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+
+        // Within the timeout: nothing is reclaimed.
+        test_clock.advance(Duration::from_secs(60));
+        let quiet = store.reap_expired(reap(90, 86_400)).await.expect("reap");
+        assert_eq!(quiet, ReapOutcome::default());
+        store.heartbeat(lease_of(&task)).await.expect("still held");
+
+        // Past the timeout with no further heartbeat: reclaimed.
+        test_clock.advance(Duration::from_secs(91));
+        let reaped = store.reap_expired(reap(90, 86_400)).await.expect("reap");
+        assert_eq!(reaped.requeued, 1);
+        assert_eq!(reaped.abandoned, 0);
+
+        // The old lease is now worthless.
+        let error = store
+            .heartbeat(lease_of(&task))
+            .await
+            .expect_err("reclaimed");
+        assert!(
+            matches!(
+                error,
+                TaskStoreError::LeaseLost { .. } | TaskStoreError::NotClaimed { .. }
+            ),
+            "expected the old lease to be refused, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reaped_task_is_not_instantly_reclaimable() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.unwrap();
+        claim_one(&store).await;
+        store.claim(any("pod-2")).await.unwrap().unwrap();
+
+        test_clock.advance(Duration::from_secs(100));
+        store.reap_expired(reap(90, 86_400)).await.expect("reap");
+
+        assert!(
+            store.claim(any("pod-3")).await.unwrap().is_none(),
+            "a reaped task takes backoff; re-claiming it instantly would burn its budget in minutes"
+        );
+        test_clock.advance(Duration::from_secs(60));
+        assert!(store.claim(any("pod-3")).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_heartbeats_forever_is_still_cut_off_by_the_backstop() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+
+        // Heartbeat diligently for well past the maximum duration.
+        for _ in 0..10 {
+            test_clock.advance(Duration::from_secs(60));
+            let _ = store.heartbeat(lease_of(&task)).await;
+        }
+
+        let reaped = store.reap_expired(reap(90, 300)).await.expect("reap");
+        assert_eq!(
+            reaped.requeued, 1,
+            "a wedged-but-alive worker must not hold a task indefinitely"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reap_consumes_an_attempt_and_can_abandon() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        let mut job = two_tile_job();
+        job.max_attempts = 1;
+        store.create_job(job).await.unwrap();
+
+        claim_one(&store).await;
+        test_clock.advance(Duration::from_secs(100));
+
+        let reaped = store.reap_expired(reap(90, 86_400)).await.expect("reap");
+        assert_eq!(
+            (reaped.requeued, reaped.abandoned),
+            (0, 1),
+            "the single permitted start was spent by claiming, so the reap abandons"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gate_reports_in_progress_then_complete() {
+        let store = store(clock());
+        let job = store.create_job(two_tile_job()).await.unwrap();
+
+        assert_eq!(
+            store.job_status(job.job_id).await.unwrap(),
+            JobStatus::InProgress {
+                pending: 2,
+                claimed: 0,
+                succeeded: 0,
+                abandoned: 0
+            }
+        );
+
+        for _ in 0..2 {
+            let task = claim_one(&store).await;
+            store.complete(lease_of(&task)).await.unwrap();
+        }
+
+        assert_eq!(
+            store.job_status(job.job_id).await.unwrap(),
+            JobStatus::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_task_is_visible_while_work_continues_then_fails_the_job() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        let mut spec = two_tile_job();
+        spec.max_attempts = 1;
+        let job = store.create_job(spec).await.unwrap();
+
+        let doomed = claim_one(&store).await;
+        store
+            .fail(FailRequest {
+                lease: lease_of(&doomed),
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // One tile is unrecoverable, but the other is still runnable — and
+        // the operator can see the problem now rather than in a fortnight.
+        assert_eq!(
+            store.job_status(job.job_id).await.unwrap(),
+            JobStatus::InProgress {
+                pending: 1,
+                claimed: 0,
+                succeeded: 0,
+                abandoned: 1
+            }
+        );
+
+        let other = claim_one(&store).await;
+        store.complete(lease_of(&other)).await.unwrap();
+
+        assert_eq!(
+            store.job_status(job.job_id).await.unwrap(),
+            JobStatus::Failed { abandoned: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gate_rejects_a_job_it_does_not_know() {
+        let store = store(clock());
+        let error = store
+            .job_status(JobId::generate())
+            .await
+            .expect_err("unknown job");
+        assert!(
+            matches!(error, TaskStoreError::UnknownJob { .. }),
+            "expected UnknownJob, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn throughput_separates_pending_from_claimable_now() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        let job = store.create_job(two_tile_job()).await.unwrap();
+
+        let task = claim_one(&store).await;
+        store
+            .fail(FailRequest {
+                lease: lease_of(&task),
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let snapshot = store.throughput(job.job_id).await.unwrap();
+        assert_eq!(snapshot.pending, 2, "both tasks are pending");
+        assert_eq!(
+            snapshot.claimable_now, 1,
+            "one is in backoff, so only one can be claimed right now"
+        );
+
+        test_clock.advance(Duration::from_secs(60));
+        let later = store.throughput(job.job_id).await.unwrap();
+        assert_eq!(later.claimable_now, 2);
+    }
+
+    #[tokio::test]
+    async fn a_job_with_no_tasks_is_refused_rather_than_declared_complete() {
+        let store = store(clock());
+        let mut empty = two_tile_job();
+        empty.tasks.clear();
+        let error = store
+            .create_job(empty)
+            .await
+            .expect_err("an empty job is refused");
+        assert!(
+            matches!(error, TaskStoreError::EmptyJob { .. }),
+            "expected EmptyJob, got {error:?}"
+        );
     }
 
     #[tokio::test]

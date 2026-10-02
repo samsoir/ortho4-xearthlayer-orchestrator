@@ -47,6 +47,11 @@ pub enum TaskStoreError {
     #[error("task set contains {tile} {task_type} more than once")]
     DuplicateTask { tile: TileId, task_type: TaskType },
 
+    /// A job must contain at least one task. A job of none would report
+    /// `Complete` vacuously, which is a silently wrong answer.
+    #[error("a job for region {region_code} revision {revision} must contain at least one task")]
+    EmptyJob { region_code: String, revision: u32 },
+
     #[error("task store adapter failed: {0}")]
     Adapter(String),
 }
@@ -99,6 +104,13 @@ mod tests {
                     task_type: TaskType::Ortho,
                 },
                 "more than once",
+            ),
+            (
+                TaskStoreError::EmptyJob {
+                    region_code: "NA".to_string(),
+                    revision: 1,
+                },
+                "at least one task",
             ),
             (
                 TaskStoreError::Adapter("connection reset".to_string()),
