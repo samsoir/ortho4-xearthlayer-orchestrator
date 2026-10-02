@@ -4071,10 +4071,11 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
             sqlx::query(
                 "UPDATE tasks SET state = 'abandoned', lease_token = NULL, claimed_by = NULL, \
                      claimed_at = NULL, last_heartbeat_at = NULL, last_failure = $2 \
-                 WHERE id = $1",
+                 WHERE id = $1 AND lease_token = $3",
             )
             .bind(request.lease.task_id.as_uuid())
             .bind(&request.reason)
+            .bind(request.lease.token.as_uuid())
             .execute(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -4085,11 +4086,12 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
                 "UPDATE tasks SET state = 'pending', claimable_at = $2, lease_token = NULL, \
                      claimed_by = NULL, claimed_at = NULL, last_heartbeat_at = NULL, \
                      last_failure = $3 \
-                 WHERE id = $1",
+                 WHERE id = $1 AND lease_token = $4",
             )
             .bind(request.lease.task_id.as_uuid())
             .bind(claimable_at)
             .bind(&request.reason)
+            .bind(request.lease.token.as_uuid())
             .execute(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -4117,9 +4119,20 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
                 .unwrap_or(chrono::Duration::zero());
 
         // One statement so a concurrent reaper cannot double-count: each
-        // expired row is updated by exactly one of them. The CASE spends the
-        // start that was already consumed at claim, abandoning when the
-        // budget is gone and requeueing with backoff otherwise.
+        // expired row is updated by exactly one of them. The loser of a
+        // contested row blocks, then re-checks the predicate against the
+        // committed row, finds it no longer 'claimed', and drops it from its
+        // own result set -- so the row is counted once, not twice and not
+        // never. The CASE spends the start that was already consumed at
+        // claim, abandoning when the budget is gone and requeueing with
+        // backoff otherwise.
+        //
+        // Two reapers running at once can deadlock each other, as any pair of
+        // large concurrent bulk updates can, if they reach the same rows in
+        // different orders. PostgreSQL detects it and aborts one side, which
+        // arrives here as a retryable `Adapter` error rather than as
+        // corruption, so a caller that retries is correct. One reaper is the
+        // expected deployment.
         let rows: Vec<(String,)> = sqlx::query_as(
             "UPDATE tasks AS t SET \
                  state = CASE WHEN t.attempts >= j.max_attempts THEN 'abandoned' ELSE 'pending' END, \
