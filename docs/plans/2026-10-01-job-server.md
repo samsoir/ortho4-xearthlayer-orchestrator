@@ -917,8 +917,8 @@ use async_trait::async_trait;
 use crate::error::TaskStoreError;
 use crate::ids::JobId;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, Lease, ReapOutcome, ReapRequest,
-    JobCreated, JobStatus, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
+    ReapOutcome, ReapRequest, Throughput,
 };
 
 /// Durable task state, leasing, retry accounting and the completion gate.
@@ -3379,8 +3379,8 @@ use oxo_tasks::clock::Clock;
 use oxo_tasks::error::TaskStoreError;
 use oxo_tasks::ids::JobId;
 use oxo_tasks::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, Lease, ReapOutcome, ReapRequest,
-    JobCreated, JobStatus, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
+    ReapOutcome, ReapRequest, Throughput,
 };
 use oxo_tasks::store::TaskStore;
 use sqlx::PgPool;
