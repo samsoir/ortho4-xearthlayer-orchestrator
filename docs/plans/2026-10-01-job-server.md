@@ -3981,12 +3981,21 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
     /// be invalid. A single query so the checks cannot drift apart between
     /// the three reporting calls, and so the answer cannot change between
     /// two of them.
+    ///
+    /// `FOR UPDATE` is load-bearing, and here it genuinely locks: the row
+    /// exists, so the lock holds for the caller's transaction and the reaper
+    /// cannot reclaim the task between this check and the write that follows
+    /// it. Without it the write's own `lease_token` predicate would match no
+    /// rows and the call would report success having changed nothing -- the
+    /// in-memory adapter holds its mutex across the whole operation, so it
+    /// has no such window. Note the contrast with `create_job`, where the
+    /// row does NOT yet exist and `FOR UPDATE` would lock nothing at all.
     async fn resolve<'e, E>(executor: E, lease: Lease) -> Result<(), TaskStoreError>
     where
         E: sqlx::PgExecutor<'e>,
     {
         let row: Option<(String, Option<Uuid>)> =
-            sqlx::query_as("SELECT state, lease_token FROM tasks WHERE id = $1")
+            sqlx::query_as("SELECT state, lease_token FROM tasks WHERE id = $1 FOR UPDATE")
                 .bind(lease.task_id.as_uuid())
                 .fetch_optional(executor)
                 .await
@@ -4050,8 +4059,8 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
         Self::resolve(&mut *tx, request.lease).await?;
 
         let (attempts, max_attempts, backoff_secs): (i64, i64, i64) = sqlx::query_as(
-            "SELECT j.attempts, r.max_attempts, r.backoff_secs \
-             FROM tasks j JOIN jobs r ON r.id = j.job_id WHERE j.id = $1",
+            "SELECT t.attempts, j.max_attempts, j.backoff_secs \
+             FROM tasks t JOIN jobs j ON j.id = t.job_id WHERE t.id = $1",
         )
         .bind(request.lease.task_id.as_uuid())
         .fetch_one(&mut *tx)
@@ -4142,7 +4151,7 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
     }
 ```
 
-`RETURNING j.state` returns the value the `CASE` just assigned, because
+`RETURNING t.state` returns the value the `CASE` just assigned, because
 `RETURNING` sees the new row — simpler than recomputing the branch and
 unambiguously the same answer. Note also that `backoff_secs` is `bigint`
 while `make_interval(secs => …)` takes `double precision` with no implicit
