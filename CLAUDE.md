@@ -4,11 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-**This repository contains no code yet.** It holds `README.md` (the high-level specification), `docs/specs/` (design documents and decision records), and `docs/plans/` (implementation plans). There is no build system, no test suite, and no language toolchain configured.
+The repository holds a Cargo workspace alongside the documents it was planned from: `README.md` (the high-level specification), `docs/specs/` (design documents and decision records), and `docs/plans/` (implementation plans).
 
-Consequences for working here:
+Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.74):
 
-- There are no build/lint/test commands to run. Do not invent them. The toolchain is expected to be Cargo plus a `Makefile` wrapper (see **House Conventions**); update this file with the real commands once the first crate lands.
+| Crate | Role |
+|---|---|
+| `oxo-spec` | Region specification model and static validation — sub-project 1. A **pure library**: no filesystem, no network, no clock. The model is in `oxo-spec/src/` (`tile.rs`, `metadata.rs`, `parameters.rs`, `policy.rs`, `target.rs`, `raw.rs`, `spec.rs`), every validation rule in `oxo-spec/src/validate.rs`. |
+| `oxo-spec-cli` | Thin CLI over that library, binary `oxo-spec`, subcommands `validate` and `show`. This is the component that reads files; the library never does. |
+
+Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them):
+
+- `make verify` — format-check + clippy `-D warnings` + tests with `RUSTFLAGS="-D warnings"`. **Run this before every commit.**
+- `make pre-commit` — `verify`, required before pushing. Docs-only changes are exempt.
+- `make test` (all tests), `make lint` (clippy), `make format` / `make format-check`, `make build`, `make check`, `make coverage` (needs `cargo-llvm-cov`), `make clean`.
+
+81 Rust tests plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`) currently pass.
+
+Also note:
+
 - `docs/specs/2026-10-01-oxo-architecture-design.md` is **the source of truth for architecture and decisions**. Read it before proposing any design or code. Where a sub-project design contradicts it, that document is wrong and must be amended rather than silently diverged from.
 - `README.md` states the problem and the three production phases. It predates the architecture document and is not updated by it; where they differ on execution details, the architecture document governs.
 
@@ -80,10 +94,10 @@ Matching the author's established convention across sibling projects:
 
 ## House Conventions (from the sibling `xearthlayer` project)
 
-Follow these when scaffolding; none of it exists in this repository yet.
+In place for the Rust workspace; apply them to anything added.
 
-- A `Makefile` fronts all development tasks, with `make verify` = `format-check + lint + test-strict`, and `make pre-commit` before every push. Docs-only changes are exempt from `pre-commit`.
-- Minimum 80% test coverage, target 90%+.
+- A `Makefile` fronts all development tasks, with `make verify` = `format-check + lint + test-strict`, and `make pre-commit` before every push. Docs-only changes are exempt from `pre-commit`. **Repository Status** above lists the full set of targets.
+- Minimum 80% test coverage, target 90%+. Currently **94.21% of lines and 92.41% of regions** (source-only, measured on `sub-project-1-region-spec`) over the 81 tests and 8 scenarios. Note that `make coverage` cannot be run in this environment — `cargo-llvm-cov` is not installed — so that figure comes from a measurement made elsewhere on this branch.
 - Traits for abstraction plus dependency injection, so every component is testable in isolation with mocks.
 
 ## Related Repositories
