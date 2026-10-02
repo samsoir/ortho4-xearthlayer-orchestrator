@@ -10,7 +10,6 @@ rust-version.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 oxo-tasks = { path = "../oxo-tasks" }
-oxo-spec = { path = "../oxo-spec" }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 

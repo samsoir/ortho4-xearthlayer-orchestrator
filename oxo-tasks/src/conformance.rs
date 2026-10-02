@@ -221,6 +221,20 @@ pub async fn a_task_type_filter_is_honoured(fixture: &dyn Fixture) {
         .expect("claim")
         .expect("an overlay task exists");
     assert_eq!(claimed.task_type, TaskType::Overlay);
+
+    let again = subject
+        .store
+        .claim(ClaimRequest {
+            worker: "pod".to_string(),
+            task_types: Some(vec![TaskType::Overlay]),
+        })
+        .await
+        .expect("claim");
+    assert!(
+        again.is_none(),
+        "only one overlay task exists, so a second filtered claim finds nothing — without \
+         this the case passes whenever the untyped tie-break happens to pick the overlay"
+    );
 }
 
 pub async fn a_stale_lease_is_refused_by_every_reporting_call(fixture: &dyn Fixture) {
@@ -481,6 +495,88 @@ pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixtu
     assert_eq!(abandoned, FailOutcome::Abandoned);
 }
 
+/// A requeued task waits out its backoff before it can be claimed again.
+///
+/// One task, so the claim below cannot be satisfied by a sibling. Without
+/// this gate a tile that kills its worker is handed straight back and spends
+/// its whole attempt budget in milliseconds.
+pub async fn a_task_in_backoff_is_not_claimable_until_it_elapses(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+
+    let claimed = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let outcome = subject
+        .store
+        .fail(FailRequest {
+            lease: lease_of(&claimed),
+            reason: "Crash!".to_string(),
+        })
+        .await
+        .expect("fail");
+    assert!(
+        matches!(outcome, FailOutcome::Requeued { .. }),
+        "the budget allows another start, so this is a requeue: {outcome:?}"
+    );
+
+    assert!(
+        subject
+            .store
+            .claim(any_task("pod"))
+            .await
+            .expect("claim")
+            .is_none(),
+        "a task still inside its backoff must not be handed out"
+    );
+
+    // one_task_job's backoff is sixty seconds.
+    subject.clock.advance(Duration::from_secs(60));
+    assert!(
+        subject
+            .store
+            .claim(any_task("pod"))
+            .await
+            .expect("claim")
+            .is_some(),
+        "once the backoff has elapsed the task is claimable again"
+    );
+}
+
+/// An empty capacity set claims nothing, rather than everything.
+///
+/// The PostgreSQL adapter's filter turns on the difference between an empty
+/// `text[]` and SQL `NULL`, so the two readings of "no types" are one
+/// mistake apart.
+pub async fn an_empty_task_type_filter_claims_nothing(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(two_task_job())
+        .await
+        .expect("create");
+
+    assert!(
+        subject
+            .store
+            .claim(ClaimRequest {
+                worker: "pod".to_string(),
+                task_types: Some(Vec::new()),
+            })
+            .await
+            .expect("claim")
+            .is_none(),
+        "a worker that can take no task type must be handed nothing"
+    );
+}
+
 pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
@@ -526,7 +622,11 @@ pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &d
 
     for _ in 0..10 {
         subject.clock.advance(Duration::from_secs(30));
-        let _ = subject.store.heartbeat(lease_of(&task)).await;
+        subject
+            .store
+            .heartbeat(lease_of(&task))
+            .await
+            .expect("a held lease heartbeats");
     }
 
     let reaped = subject
@@ -731,6 +831,11 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, a_reclaimed_task_refuses_its_previous_holder);
         $crate::conformance_case!($fixture, an_unknown_task_is_refused_by_every_reporting_call);
         $crate::conformance_case!($fixture, a_failure_is_requeued_until_the_budget_is_spent);
+        $crate::conformance_case!(
+            $fixture,
+            a_task_in_backoff_is_not_claimable_until_it_elapses
+        );
+        $crate::conformance_case!($fixture, an_empty_task_type_filter_claims_nothing);
         $crate::conformance_case!(
             $fixture,
             a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start

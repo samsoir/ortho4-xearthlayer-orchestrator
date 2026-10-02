@@ -31,7 +31,7 @@ format-check: ## Check formatting without modifying
 
 .PHONY: lint
 lint: ## Run clippy
-	$(CARGO) clippy --workspace --all-targets -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: coverage
 coverage: ## Coverage summary (requires cargo-llvm-cov)

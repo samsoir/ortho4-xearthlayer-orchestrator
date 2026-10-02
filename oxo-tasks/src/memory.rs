@@ -844,7 +844,10 @@ mod tests {
         // Heartbeat diligently for well past the maximum duration.
         for _ in 0..10 {
             test_clock.advance(Duration::from_secs(60));
-            let _ = store.heartbeat(lease_of(&task)).await;
+            store
+                .heartbeat(lease_of(&task))
+                .await
+                .expect("a held lease heartbeats");
         }
 
         let reaped = store.reap_expired(reap(90, 300)).await.expect("reap");
