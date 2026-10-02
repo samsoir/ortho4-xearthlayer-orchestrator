@@ -1,0 +1,22 @@
+[package]
+name = "oxo-tasks-postgres"
+description = "PostgreSQL adapter for the OXO task store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+oxo-tasks = { path = "../oxo-tasks" }
+oxo-spec = { path = "../oxo-spec" }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+oxo-tasks = { path = "../oxo-tasks", features = ["conformance"] }
+tokio = { workspace = true }
+
+[[test]]
+name = "conformance_postgres"
