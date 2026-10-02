@@ -812,6 +812,174 @@ pub async fn concurrent_claims_hand_each_task_out_exactly_once(fixture: &dyn Fix
     assert_eq!(all, unique, "no task was claimed twice");
 }
 
+/// The likeliest duplicate call in production: a worker completes, the
+/// response is lost, and it retries.
+pub async fn completing_a_task_twice_reports_not_claimed(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    let claimed = subject
+        .store
+        .claim(any_task("w1"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let lease = lease_of(&claimed);
+    subject.store.complete(lease).await.expect("first complete");
+    let error = subject
+        .store
+        .complete(lease)
+        .await
+        .expect_err("second complete must be refused");
+    assert!(
+        matches!(error, TaskStoreError::NotClaimed { task_id } if task_id == claimed.task_id),
+        "got {error:?}"
+    );
+}
+
+/// The policy arm of `JobConflict`: the task set matches, the failure policy
+/// does not.
+pub async fn resuming_a_job_with_a_different_policy_is_a_conflict(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(two_task_job())
+        .await
+        .expect("create");
+
+    let mut slower = two_task_job();
+    slower.backoff = BackoffSeconds::new(61).expect("in range");
+    let mut stricter = two_task_job();
+    stricter.max_attempts = MaxAttempts::new(4).expect("non-zero");
+
+    for altered in [slower, stricter] {
+        let error = subject
+            .store
+            .create_job(altered)
+            .await
+            .expect_err("a changed policy must conflict");
+        assert!(
+            matches!(
+                &error,
+                TaskStoreError::JobConflict { region_code, revision }
+                    if region_code == "NA" && *revision == 1
+            ),
+            "expected JobConflict for NA revision 1, got {error:?}"
+        );
+    }
+}
+
+pub async fn two_revisions_of_one_region_are_separate_jobs(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create revision 1");
+    let mut second_spec = one_task_job();
+    second_spec.revision = 2;
+    let second = subject
+        .store
+        .create_job(second_spec)
+        .await
+        .expect("create revision 2");
+    assert!(first.created);
+    assert!(second.created);
+    assert_ne!(first.job_id, second.job_id);
+
+    // Both tasks became claimable at one instant, so which comes out first is
+    // unspecified. Claim both and complete only revision 1's.
+    let mut claimed = Vec::new();
+    while let Some(task) = subject.store.claim(any_task("pod")).await.expect("claim") {
+        claimed.push(task);
+    }
+    assert_eq!(claimed.len(), 2, "each revision has its own task");
+    let ours = claimed
+        .iter()
+        .find(|task| task.job_id == first.job_id)
+        .expect("revision 1's task was handed out");
+    subject
+        .store
+        .complete(lease_of(ours))
+        .await
+        .expect("complete");
+
+    assert_eq!(
+        subject
+            .store
+            .job_status(first.job_id)
+            .await
+            .expect("status"),
+        JobStatus::Complete
+    );
+    assert!(
+        matches!(
+            subject
+                .store
+                .job_status(second.job_id)
+                .await
+                .expect("status"),
+            JobStatus::InProgress { .. }
+        ),
+        "revision 2 is untouched by revision 1's completion"
+    );
+}
+
+/// Set comparison, not sequence comparison.
+pub async fn a_task_set_matches_regardless_of_order(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(two_task_job())
+        .await
+        .expect("create");
+    let mut reversed = two_task_job();
+    reversed.tasks = two_task_job().tasks.into_iter().rev().collect();
+    let second = subject
+        .store
+        .create_job(reversed)
+        .await
+        .expect("a reordered task set resumes the job");
+    assert!(first.created);
+    assert!(!second.created);
+    assert_eq!(first.job_id, second.job_id);
+}
+
+/// Ordering is by when a task became claimable, with an identity tie-break
+/// inside a single instant. Tasks created together share one instant, so the
+/// case spans two deliberately.
+pub async fn claims_serve_the_oldest_claimable_task_first(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    subject.clock.advance(Duration::from_secs(10));
+    let mut later_spec = one_task_job();
+    later_spec.region_code = "EU".to_string();
+    later_spec.tasks[0].tile = tile(48, 2);
+    let later = subject.store.create_job(later_spec).await.expect("create");
+
+    let one = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let two = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    assert_eq!(one.job_id, first.job_id, "the older task is served first");
+    assert_eq!(two.job_id, later.job_id, "the newer task is served second");
+}
+
 /// Generate one `#[tokio::test]` per conformance case.
 ///
 /// Takes an expression producing a [`Fixture`]. The case list lives here and
@@ -853,6 +1021,14 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, an_unknown_job_is_refused_by_the_gate);
         $crate::conformance_case!($fixture, throughput_separates_pending_from_claimable_now);
         $crate::conformance_case!($fixture, concurrent_claims_hand_each_task_out_exactly_once);
+        $crate::conformance_case!($fixture, completing_a_task_twice_reports_not_claimed);
+        $crate::conformance_case!(
+            $fixture,
+            resuming_a_job_with_a_different_policy_is_a_conflict
+        );
+        $crate::conformance_case!($fixture, two_revisions_of_one_region_are_separate_jobs);
+        $crate::conformance_case!($fixture, a_task_set_matches_regardless_of_order);
+        $crate::conformance_case!($fixture, claims_serve_the_oldest_claimable_task_first);
     };
 }
 
