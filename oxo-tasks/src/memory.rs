@@ -119,7 +119,10 @@ impl State {
             .ok_or(TaskStoreError::UnknownJob { job_id })?;
         let mut tally = Tally::default();
         for id in &job.task_ids {
-            let task = &self.tasks[id];
+            let task = self
+                .tasks
+                .get(id)
+                .expect("job.task_ids only contains ids present in state.tasks");
             match task.state {
                 TaskState::Pending => {
                     tally.pending += 1;
@@ -155,7 +158,7 @@ impl TaskStore for InMemoryTaskStore {
             });
         }
 
-        // Refuse a duplicated pair before anything else. Deduplicating would
+        // Refuse duplicate pairs after the empty check. Deduplicating would
         // make total_tasks disagree with the request, and would diverge from
         // the PostgreSQL adapter, whose unique constraint collapses it.
         let mut seen = BTreeSet::new();
@@ -374,7 +377,14 @@ impl TaskStore for InMemoryTaskStore {
 
         let mut outcome = ReapOutcome::default();
         for task_id in expired {
-            let (max_attempts, backoff) = policies[&state.tasks[&task_id].job_id];
+            let job_id = state
+                .tasks
+                .get(&task_id)
+                .expect("task_id was selected from state.tasks.iter() above")
+                .job_id;
+            let (max_attempts, backoff) = *policies
+                .get(&job_id)
+                .expect("every task.job_id points to a job in state.jobs");
             let task = state.tasks.get_mut(&task_id).expect("just selected");
             task.lease = None;
             task.claimed_by = None;
