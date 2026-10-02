@@ -19,7 +19,7 @@ Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them)
 - `make pre-commit` — `verify`, required before pushing. Docs-only changes are exempt.
 - `make test` (all tests), `make lint` (clippy), `make format` / `make format-check`, `make build`, `make check`, `make coverage` (needs `cargo-llvm-cov`), `make clean`.
 
-73 Rust tests plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`) currently pass.
+77 Rust tests plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`) currently pass.
 
 Also note:
 
@@ -97,7 +97,7 @@ Matching the author's established convention across sibling projects:
 In place for the Rust workspace; apply them to anything added.
 
 - A `Makefile` fronts all development tasks, with `make verify` = `format-check + lint + test-strict`, and `make pre-commit` before every push. Docs-only changes are exempt from `pre-commit`. **Repository Status** above lists the full set of targets.
-- Minimum 80% test coverage, target 90%+. Currently **94.21% of lines and 92.41% of regions** (source-only, measured on `sub-project-1-region-spec`) over the 73 tests and 8 scenarios. Note that `make coverage` cannot be run in this environment — `cargo-llvm-cov` is not installed — so that figure comes from a measurement made elsewhere on this branch.
+- Minimum 80% test coverage, target 90%+. Currently **94.21% of lines and 92.41% of regions** (source-only, measured on `sub-project-1-region-spec`) over the 77 tests and 8 scenarios. Note that `make coverage` cannot be run in this environment — `cargo-llvm-cov` is not installed — so that figure comes from a measurement made elsewhere on this branch.
 - Traits for abstraction plus dependency injection, so every component is testable in isolation with mocks.
 
 ## Related Repositories

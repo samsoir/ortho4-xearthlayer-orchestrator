@@ -259,6 +259,15 @@ pub(crate) fn validate_parameters(
 /// override was at fault nor which one. Nothing keeps the first split: that
 /// would need `split("=", 1)` or `str.partition`, and the code uses neither.
 ///
+/// **Whitespace at either edge** is the subtlest of the three, and it defeats
+/// the reserved-key rule itself. `line.strip()` runs *before* the split, so
+/// `" default_zl"` reaches Ortho4XP as exactly `default_zl` and shadows the
+/// curated `zoom` field — while `contains_key("default_zl")` never matched it
+/// here, and `char::is_control` never saw it either, a space being Unicode
+/// `Zs` rather than `Cc`. `str::trim` removes Unicode `White_Space`, which
+/// covers space, NBSP, tab, `\v`, `\f` and the U+2000-range spaces, so one
+/// condition closes the family.
+///
 /// This is a pure function of the model, so it is static validation and
 /// belongs here. Every offending entry is reported, not the first.
 fn validate_raw_entries(raw: &BTreeMap<String, String>, errors: &mut Vec<ValidationError>) {
@@ -286,6 +295,8 @@ fn raw_key_fault(key: &str) -> Option<&'static str> {
         Some(LINE_BREAK_REASON)
     } else if key.contains('=') {
         Some(EQUALS_REASON)
+    } else if key.trim() != key {
+        Some(KEY_EDGE_WHITESPACE_REASON)
     } else if key.chars().any(char::is_control) {
         Some("a key cannot contain control characters")
     } else {
@@ -296,13 +307,15 @@ fn raw_key_fault(key: &str) -> Option<&'static str> {
 /// Why Ortho4XP could not be handed this raw value, or `None` if it can.
 ///
 /// An empty value is legal — `"foo="` still splits into exactly two items —
-/// and a control character other than a line break survives the read, so
-/// neither is rejected here.
+/// and an interior control character or space survives the read untouched, so
+/// neither is rejected. Only the line's edges are at risk.
 fn raw_value_fault(value: &str) -> Option<&'static str> {
     if value.contains('\n') || value.contains('\r') {
         Some(LINE_BREAK_REASON)
     } else if value.contains('=') {
         Some(EQUALS_REASON)
+    } else if value.trim() != value {
+        Some(VALUE_EDGE_WHITESPACE_REASON)
     } else {
         None
     }
@@ -312,6 +325,24 @@ fn raw_value_fault(value: &str) -> Option<&'static str> {
 const LINE_BREAK_REASON: &str =
     "Ortho4XP's tile configuration is one setting per line, so a line break \
      would inject a second setting";
+
+/// A key with whitespace at either edge is not the key Ortho4XP reads, and
+/// the example is the one that matters: it bypasses the reserved-key rule.
+const KEY_EDGE_WHITESPACE_REASON: &str =
+    "Ortho4XP strips each configuration line before splitting it, so a key \
+     with leading or trailing whitespace is not the key it reads: \
+     \" default_zl\" arrives as the reserved default_zl and shadows the \
+     curated field";
+
+/// A value with whitespace at either edge cannot round-trip. `line.strip()`
+/// removes the trailing portion outright; leading whitespace does survive the
+/// strip, but stating one value and delivering another is an authoring
+/// mistake either way, and rejecting both keeps the stated value and the
+/// delivered value the same string.
+const VALUE_EDGE_WHITESPACE_REASON: &str =
+    "Ortho4XP strips each configuration line, so a value with leading or \
+     trailing whitespace is not the value it reads; stating one value and \
+     delivering another is worse than rejecting it";
 
 /// Shared: a second `=` anywhere on the line fails the same way.
 const EQUALS_REASON: &str =
@@ -832,6 +863,78 @@ mod tests {
                 reason: EQUALS_REASON,
             }]
         );
+    }
+
+    #[test]
+    fn a_raw_key_with_leading_whitespace_cannot_bypass_the_reserved_key_rule() {
+        // The regression that matters: `line.strip()` runs before the split,
+        // so " default_zl" reaches Ortho4XP as exactly `default_zl` and
+        // shadows the curated `zoom` field. `contains_key("default_zl")`
+        // never matched it, and a space is Unicode Zs, not Cc, so
+        // `char::is_control` never saw it either.
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert(" default_zl".to_string(), "18".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::MalformedRawKey {
+                key: " default_zl".to_string(),
+                reason: KEY_EDGE_WHITESPACE_REASON,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_raw_key_with_whitespace_at_either_edge_is_a_fault() {
+        // One `trim()` condition closes the whole Unicode White_Space family.
+        for key in [
+            "default_zl ",
+            " default_zl ",
+            "\u{a0}cover_airports_with_highres",
+            "cover_airports_with_highres\u{2000}",
+        ] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert(key.to_string(), "18".to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::MalformedRawKey {
+                    key: key.to_string(),
+                    reason: KEY_EDGE_WHITESPACE_REASON,
+                }],
+                "expected {key:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_value_with_whitespace_at_either_edge_is_a_fault() {
+        for value in ["18 ", " 18", "18\u{a0}"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert("custom_dem".to_string(), value.to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::MalformedRawValue {
+                    key: "custom_dem".to_string(),
+                    reason: VALUE_EDGE_WHITESPACE_REASON,
+                }],
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn interior_whitespace_is_still_legal_because_only_the_edges_are_stripped() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw
+            .insert("custom_dem".to_string(), "SRTM V3 tiles".to_string());
+        validate_parameters(&p, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

@@ -136,8 +136,9 @@ A pure function of the model. No filesystem, no network, no clock.
 - Provider code is syntactically well formed.
 - No raw key collides with a curated field.
 - Every raw key and value can be written into an Ortho4XP tile
-  configuration: no empty key, and no line break or `=` in either half,
-  nor control character in a key. Ortho4XP reads that file as
+  configuration: no empty key, no line break, `=` or edge whitespace in
+  either half, and no control character in a key. Ortho4XP reads that
+  file as
   `dict(line.strip().split("=") for line in f if line.strip())`, which
   constrains both halves. A **line break** means the write side turns one
   override into two configuration lines, reproducing the
@@ -146,7 +147,14 @@ A pure function of the model. No filesystem, no network, no clock.
   `"foo=a=b".split("=")` gives three, so the call raises and the *whole*
   config read fails -- which Ortho4XP reports as a bare `Crash!` with no
   traceback, naming neither the override nor the file. Nothing keeps the
-  first split; that would need `split("=", 1)`.
+  first split; that would need `split("=", 1)`. **Whitespace at either
+  edge** is the subtlest, and it defeats the reserved-key rule above:
+  `strip()` runs before the split, so `" default_zl"` arrives as exactly
+  `default_zl` and shadows the curated `zoom` field, having matched
+  neither the reserved-key check nor a control-character check -- a space
+  is Unicode `Zs`, not `Cc`. A value with edge whitespace cannot
+  round-trip either, since the strip removes the trailing portion, so the
+  value Ortho4XP reads is not the value the specification states.
 - Failure policy is coherent: at least one attempt, non-negative
   backoff.
 - The target location is a well-formed path.
