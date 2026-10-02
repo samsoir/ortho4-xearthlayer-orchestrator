@@ -1,5 +1,5 @@
 [workspace]
-members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control"]
+members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control", "oxo-controld"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +11,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 thiserror = "2"
