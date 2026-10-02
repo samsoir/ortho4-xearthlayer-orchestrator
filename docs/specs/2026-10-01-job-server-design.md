@@ -205,10 +205,10 @@ serves the reaper. Both are the hot paths and nothing else is.
 ```sql
 UPDATE jobs SET
     state = 'claimed', lease_token = $1, claimed_by = $2,
-    claimed_at = now(), last_heartbeat_at = now(), attempts = attempts + 1
+    claimed_at = $4, last_heartbeat_at = $4, attempts = attempts + 1
 WHERE id = (
     SELECT id FROM jobs
-    WHERE state = 'pending' AND claimable_at <= now()
+    WHERE state = 'pending' AND claimable_at <= $4
       AND ($3::job_type[] IS NULL OR job_type = ANY($3))
     ORDER BY claimable_at, id
     FOR UPDATE SKIP LOCKED
@@ -225,6 +225,25 @@ The optional job-type filter is how a worker expresses capacity until
 there is a footprint model: a worker short on disk claims overlay work
 only, since an overlay job is a file copy and a conversion where an ortho
 job is hundreds of gigabytes.
+
+## One injected clock, never the database's
+
+**Every timestamp this subsystem reads or writes comes from an injected
+`Clock`, passed into queries as a parameter. The PostgreSQL adapter never
+calls SQL `now()`.**
+
+Two reasons, and the second is the one that matters.
+
+Testability: heartbeat expiry, backoff and the maximum-duration backstop
+are all time-dependent, and a suite that must sleep to test them is slow
+and flaky. A test clock advanced by hand makes every expiry case
+deterministic and instant — and makes those cases testable against *both*
+adapters, which a database-side `now()` would not be.
+
+Correctness: with SQL `now()` the application and the database keep
+separate clocks. A worker's heartbeat would be judged against database
+time while its own timeout logic used host time, so skew between the two
+silently changes when a job is reclaimed. One clock removes the question.
 
 ## The completion gate
 
@@ -291,6 +310,8 @@ every job was handed out exactly once.
 | Retry model | Count starts only, no failure classification | Ortho4XP's headless path reports a bare `Crash!` with no traceback, so a required classification would be filled with a guess |
 | Failure policy | Snapshotted onto the run at creation | Editing a specification must not retroactively change a run in flight, which matters across a weeks-long build |
 | Run identity | `(region_code, revision)`; the same revision resumes idempotently, a new revision is a fresh run | Makes resume-after-interruption work — the case that actually happens — while keeping cross-run reuse, which is incremental production, out of scope |
+| Clock | One injected `Clock`; timestamps passed as query parameters, never SQL `now()` | Makes every expiry and backoff case deterministically testable against both adapters, and removes application-versus-database clock skew from when a job is reclaimed |
+| Trait dispatch | `async_trait`, so the port is dyn-compatible | The composition root injects the adapter behind a trait object; native async-fn-in-trait is also unavailable under the project's declared 1.74 MSRV, which stabilised it in 1.75 |
 | Claim ordering | First-in-first-out by `claimable_at` | Simplest fair order; the job-type filter is how a worker expresses capacity until a footprint model exists |
 | Gate shape | `Complete` / `Failed` / `InProgress`, with abandoned counts visible throughout | An unachievable region should be visible in minutes, not after a fortnight |
 | Conformance testing | One suite against both adapters; PostgreSQL excluded by name from `make verify` | A shared suite stops the fake drifting; exclusion by name rather than a runtime skip prevents a green run that tested nothing |
