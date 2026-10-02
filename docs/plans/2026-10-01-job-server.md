@@ -3392,7 +3392,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 /// A task store backed by PostgreSQL.
+///
+/// The fields are unread until Task 10 fills the first port methods, and
+/// `make lint` runs clippy with `-D warnings` over the whole workspace, so
+/// the allow is load-bearing until then. It mirrors the same allow on the
+/// in-memory adapter's `Task` struct.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct PostgresTaskStore {
     pool: PgPool,
     clock: Arc<dyn Clock>,
@@ -3406,6 +3412,9 @@ impl PostgresTaskStore {
 
 /// Adapter failures become `TaskStoreError::Adapter`, which is the only
 /// variant a caller may consider retrying.
+///
+/// Unused until Task 10, for the same reason the struct carries an allow.
+#[allow(dead_code)]
 fn adapter(error: sqlx::Error) -> TaskStoreError {
     TaskStoreError::Adapter(error.to_string())
 }
@@ -3484,7 +3493,7 @@ async fn the_schema_applies_and_is_idempotent() {
             .fetch_all(&pool)
             .await
             .expect("list tables");
-    assert!(tables.iter().any(|t| t == "runs"), "{tables:?}");
+    assert!(tables.iter().any(|t| t == "jobs"), "{tables:?}");
     assert!(tables.iter().any(|t| t == "tasks"), "{tables:?}");
 }
 ```
@@ -3492,7 +3501,9 @@ async fn the_schema_applies_and_is_idempotent() {
 - [ ] **Step 6: Run it and verify it fails for the right reason**
 
 Run: `make verify-db`
-Expected: the container starts, then FAIL — the migration directory is read but the crate does not compile, or the assertion fails because the schema is absent. Capture the real output. Then make it pass by correcting whatever the failure names.
+Expected: the container starts, then FAIL — the migration directory is read but the crate does not compile, or the assertion fails because the schema is absent. Capture the real output.
+
+Then make it pass. The table names are `jobs` and `tasks`, fixed by the schema above and relied on by every query in Tasks 10-12: if the failure names a table, correct the *test*, never the schema.
 
 Run: `make verify`
 Expected: PASS, and it must **not** attempt the database tests. Confirm by reading the output: no `conformance_postgres` target should appear.
