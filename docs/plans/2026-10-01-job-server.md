@@ -103,6 +103,8 @@ oxo-spec = { path = "../oxo-spec" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+tokio = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 ```
@@ -2449,7 +2451,7 @@ Modify `oxo-tasks/Cargo.toml`:
 [features]
 # Exposes the conformance suite so another crate's adapter can be held to
 # the same contract. Off by default: it is test scaffolding, not API.
-conformance = []
+conformance = ["tokio"]
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -3181,11 +3183,12 @@ git add oxo-tasks/ Makefile
 git commit -F - <<'EOF'
 test(tasks): add the conformance suite both adapters must satisfy
 
-Fifteen cases asserting invariants rather than implementation: a task is
-handed out exactly once, a stale lease is refused by every reporting
-call, a reap spends a start, a wedged worker is cut off by the backstop,
-the gate moves through its three shapes, and concurrent claimants between
-them see each task exactly once.
+Eighteen cases asserting invariants rather than implementation: a task is
+handed out exactly once, a stale lease is refused by every reporting call,
+a reclaimed task refuses the token its previous holder still has, all three
+reporting calls agree on what an unknown task is, a reap spends a start, a
+wedged worker is cut off by the backstop, the gate moves through its three
+shapes, and concurrent claimants between them see each task exactly once.
 
 The case list lives in one macro, so adding a case covers every adapter
 without touching their crates, while each case still gets its own test
