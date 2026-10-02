@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::metadata::Metadata;
 use crate::parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
+use crate::policy::FailurePolicy;
+use crate::target::TargetLocation;
 use crate::tile::{TileId, TileIdParseError};
 
 /// A single static-validation fault.
@@ -216,6 +219,63 @@ fn is_well_formed_provider_code(code: &str) -> bool {
         && !code.contains('/')
         && !code.contains('\\')
         && code.chars().all(|c| !c.is_whitespace() && !c.is_control())
+}
+
+/// Validate region metadata.
+#[allow(dead_code)]
+pub(crate) fn validate_metadata(metadata: &Metadata, errors: &mut Vec<ValidationError>) {
+    if metadata.name.trim().is_empty() {
+        errors.push(ValidationError::EmptyName);
+    }
+
+    if metadata.region_code.is_empty() {
+        errors.push(ValidationError::EmptyRegionCode);
+    } else if !is_well_formed_region_code(&metadata.region_code) {
+        errors.push(ValidationError::InvalidRegionCode {
+            value: metadata.region_code.clone(),
+        });
+    }
+
+    if metadata.revision < 1 {
+        errors.push(ValidationError::RevisionTooLow);
+    }
+}
+
+fn is_well_formed_region_code(code: &str) -> bool {
+    code.len() <= 16
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Validate the artifact target.
+///
+/// The root must be absolute: a relative path means something different
+/// depending on where a pod happens to start, which is exactly the
+/// ambiguity a specification exists to remove. Whether the path exists or
+/// is writable is environmental validation.
+#[allow(dead_code)]
+pub(crate) fn validate_target(target: &TargetLocation, errors: &mut Vec<ValidationError>) {
+    if target.root.as_os_str().is_empty() {
+        errors.push(ValidationError::EmptyTargetRoot);
+    } else if !target.root.is_absolute() {
+        errors.push(ValidationError::TargetRootNotAbsolute {
+            value: target.root.display().to_string(),
+        });
+    }
+}
+
+/// Validate the failure policy.
+///
+/// Only `max_attempts` needs a rule: `backoff_seconds` is unsigned, so the
+/// design document's "non-negative backoff" requirement is enforced by the
+/// type, and alert destinations are opaque until the observability
+/// sub-project decides their representation.
+#[allow(dead_code)]
+pub(crate) fn validate_failure_policy(policy: &FailurePolicy, errors: &mut Vec<ValidationError>) {
+    if policy.max_attempts < 1 {
+        errors.push(ValidationError::MaxAttemptsTooLow);
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +495,115 @@ mod tests {
         );
         validate_parameters(&p, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    fn metadata() -> Metadata {
+        Metadata {
+            name: "North America".to_string(),
+            region_code: "NA".to_string(),
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn well_formed_metadata_passes() {
+        let mut errors = Vec::new();
+        validate_metadata(&metadata(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_blank_name_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.name = "   ".to_string();
+        validate_metadata(&m, &mut errors);
+        assert_eq!(errors, vec![ValidationError::EmptyName]);
+    }
+
+    #[test]
+    fn region_codes_in_use_are_accepted() {
+        for code in ["NA", "OC", "EU-1", "AS-4"] {
+            let mut errors = Vec::new();
+            let mut m = metadata();
+            m.region_code = code.to_string();
+            validate_metadata(&m, &mut errors);
+            assert!(errors.is_empty(), "{code} rejected: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_lowercase_region_code_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.region_code = "na".to_string();
+        validate_metadata(&m, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidRegionCode {
+                value: "na".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn revision_zero_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.revision = 0;
+        validate_metadata(&m, &mut errors);
+        assert_eq!(errors, vec![ValidationError::RevisionTooLow]);
+    }
+
+    #[test]
+    fn an_absolute_target_root_passes_and_a_relative_one_does_not() {
+        let mut errors = Vec::new();
+        validate_target(
+            &TargetLocation {
+                root: std::path::PathBuf::from("/srv/oxo/artifacts/NA"),
+            },
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let mut errors = Vec::new();
+        validate_target(
+            &TargetLocation {
+                root: std::path::PathBuf::from("artifacts/NA"),
+            },
+            &mut errors,
+        );
+        assert_eq!(
+            errors,
+            vec![ValidationError::TargetRootNotAbsolute {
+                value: "artifacts/NA".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_empty_target_root_is_a_fault() {
+        let mut errors = Vec::new();
+        validate_target(
+            &TargetLocation {
+                root: std::path::PathBuf::new(),
+            },
+            &mut errors,
+        );
+        assert_eq!(errors, vec![ValidationError::EmptyTargetRoot]);
+    }
+
+    #[test]
+    fn zero_attempts_is_a_fault() {
+        let mut errors = Vec::new();
+        validate_failure_policy(
+            &FailurePolicy {
+                max_attempts: 0,
+                backoff_seconds: 0,
+                alert_destinations: Vec::new(),
+            },
+            &mut errors,
+        );
+        assert_eq!(errors, vec![ValidationError::MaxAttemptsTooLow]);
     }
 }
