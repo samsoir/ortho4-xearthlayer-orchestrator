@@ -48,7 +48,17 @@ fn validate_accepts_a_valid_specification() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains('1'), "expected a tile count: {stdout}");
+    // Not `contains('1')`: the success line embeds the fixture path, which
+    // embeds the process id, so that assertion passed whenever the pid
+    // happened to contain a '1'.
+    assert!(
+        stdout.contains("1 tile(s)"),
+        "expected a tile count: {stdout}"
+    );
+    assert!(
+        stdout.contains("region NA"),
+        "expected the region code: {stdout}"
+    );
     std::fs::remove_file(path).ok();
 }
 
@@ -74,6 +84,30 @@ fn show_prints_the_normalised_specification() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("+50-002"), "{stdout}");
     assert!(stdout.contains("region_code"), "{stdout}");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn malformed_toml_is_reported_as_a_parse_failure_and_exits_non_zero() {
+    let path = fixture("malformed", "tiles = [\nthis is not toml\n");
+    let output = run(&["validate", path.to_str().unwrap()]);
+    assert!(!output.status.success(), "should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not parse"), "{stderr}");
+    assert!(
+        stderr.contains(path.to_str().unwrap()),
+        "the message must name the file: {stderr}"
+    );
+    // A schema fault suppresses the rest, so the wording must not read as
+    // if it were the only problem.
+    assert!(
+        stderr.contains("remaining faults"),
+        "the message must signal that more may follow: {stderr}"
+    );
+    assert!(
+        !stderr.contains("fault(s):"),
+        "a parse failure is not a validation report: {stderr}"
+    );
     std::fs::remove_file(path).ok();
 }
 

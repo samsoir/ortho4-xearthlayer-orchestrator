@@ -85,8 +85,65 @@ impl RegionSpec {
     }
 
     /// Parse and validate canonical TOML in one step.
+    ///
+    /// Note the asymmetry: a **schema** fault is reported alone, because
+    /// serde stops at the first one, whereas every **validation** fault in a
+    /// file that parses is reported together.
     pub fn from_toml(text: &str) -> Result<Self, SpecError> {
         let raw = RawRegionSpec::from_toml(text).map_err(SpecError::Parse)?;
         Self::validate(raw).map_err(SpecError::Validation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    /// Well formed TOML and schema, one validation fault: an empty tile set.
+    const ONE_FAULT: &str = r#"
+tiles = []
+
+[metadata]
+name = "North America"
+region_code = "NA"
+revision = 1
+
+[parameters]
+provider = "BI"
+zoom = 16
+
+[target]
+root = "/srv/oxo/artifacts/NA"
+
+[failure_policy]
+max_attempts = 3
+"#;
+
+    #[test]
+    fn a_parse_failure_names_itself_and_keeps_the_serde_error_as_its_cause() {
+        let error = RegionSpec::from_toml("this is not toml").expect_err("reject");
+        assert!(matches!(error, SpecError::Parse(_)), "got {error}");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("could not parse specification"),
+            "{rendered}"
+        );
+        let source = error
+            .source()
+            .expect("a parse failure must carry its cause");
+        assert!(!source.to_string().is_empty(), "empty cause");
+    }
+
+    #[test]
+    fn a_validation_failure_renders_its_report_and_keeps_it_as_its_cause() {
+        let error = RegionSpec::from_toml(ONE_FAULT).expect_err("reject");
+        assert!(matches!(error, SpecError::Validation(_)), "got {error}");
+        assert!(error.to_string().contains("tile set is empty"), "{error}");
+        let source = error
+            .source()
+            .expect("a validation failure must carry its report");
+        assert!(source.to_string().contains("tile set is empty"), "{source}");
     }
 }

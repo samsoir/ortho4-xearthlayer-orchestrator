@@ -54,7 +54,11 @@ fn main() -> ExitCode {
     let spec = match RegionSpec::from_toml(&text) {
         Ok(spec) => spec,
         Err(SpecError::Parse(error)) => {
+            // Serde stops at the first schema fault, so unlike validation
+            // faults this is not the whole list. Say so, or the operator
+            // reads it as the only problem.
             eprintln!("could not parse {}: {error}", path.display());
+            eprintln!("fix this and re-run to see any remaining faults");
             return ExitCode::FAILURE;
         }
         Err(SpecError::Validation(report)) => {

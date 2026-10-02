@@ -369,6 +369,137 @@ pub(crate) fn validate_failure_policy(policy: &FailurePolicy, errors: &mut Vec<V
 mod tests {
     use super::*;
 
+    /// Every variant, paired with the fragment an operator needs to see.
+    /// These strings are the crate's whole operator-facing product, so each
+    /// is rendered rather than assumed.
+    fn every_variant_with_its_fragment() -> Vec<(ValidationError, &'static str)> {
+        vec![
+            (ValidationError::EmptyTileSet, "tile set is empty"),
+            (
+                ValidationError::InvalidTileId {
+                    value: "nope".to_string(),
+                    reason: TileIdParseError::WrongLength { got: 4 },
+                },
+                "tile \"nope\" is not a valid identifier: expected 7 characters, got 4",
+            ),
+            (
+                ValidationError::DuplicateTile {
+                    value: "+50-002".to_string(),
+                    occurrences: 2,
+                },
+                "tile +50-002 is listed 2 times",
+            ),
+            (
+                ValidationError::ZoomOutOfRange { zoom: 99 },
+                "zoom level 99 is outside 10..=20",
+            ),
+            (ValidationError::EmptyProviderCode, "provider code is empty"),
+            (
+                ValidationError::InvalidProviderCode {
+                    value: "a b".to_string(),
+                },
+                "provider code \"a b\" is malformed: expected at most 64 characters",
+            ),
+            (
+                ValidationError::ReservedRawKey {
+                    key: "default_zl".to_string(),
+                    curated_field: "zoom",
+                },
+                "raw override \"default_zl\" is owned by the curated field \"zoom\"",
+            ),
+            (
+                ValidationError::MalformedRawKey {
+                    key: String::new(),
+                    reason: "an override key cannot be empty",
+                },
+                "raw override key \"\" cannot be written out: an override key cannot be empty",
+            ),
+            (
+                ValidationError::MalformedRawValue {
+                    key: "foo".to_string(),
+                    reason: LINE_BREAK_REASON,
+                },
+                "the value of raw override \"foo\" cannot be written out: Ortho4XP's tile \
+                 configuration is one setting per line",
+            ),
+            (ValidationError::EmptyName, "region name is empty"),
+            (ValidationError::EmptyRegionCode, "region code is empty"),
+            (
+                ValidationError::InvalidRegionCode {
+                    value: "na".to_string(),
+                },
+                "region code \"na\" is malformed: expected at most 16 characters",
+            ),
+            (
+                ValidationError::RevisionTooLow,
+                "revision must be at least 1",
+            ),
+            (ValidationError::EmptyTargetRoot, "target root is empty"),
+            (
+                ValidationError::TargetRootNotAbsolute {
+                    value: "artifacts/NA".to_string(),
+                },
+                "target root \"artifacts/NA\" must be an absolute path",
+            ),
+            (
+                ValidationError::MaxAttemptsTooLow,
+                "failure policy max_attempts must be at least 1",
+            ),
+        ]
+    }
+
+    /// Exhaustive on purpose. A new `ValidationError` variant stops this
+    /// compiling, which is the signal to give it a row in
+    /// `every_variant_with_its_fragment` and bump the count asserted below.
+    fn variant_name(error: &ValidationError) -> &'static str {
+        match error {
+            ValidationError::EmptyTileSet => "EmptyTileSet",
+            ValidationError::InvalidTileId { .. } => "InvalidTileId",
+            ValidationError::DuplicateTile { .. } => "DuplicateTile",
+            ValidationError::ZoomOutOfRange { .. } => "ZoomOutOfRange",
+            ValidationError::EmptyProviderCode => "EmptyProviderCode",
+            ValidationError::InvalidProviderCode { .. } => "InvalidProviderCode",
+            ValidationError::ReservedRawKey { .. } => "ReservedRawKey",
+            ValidationError::MalformedRawKey { .. } => "MalformedRawKey",
+            ValidationError::MalformedRawValue { .. } => "MalformedRawValue",
+            ValidationError::EmptyName => "EmptyName",
+            ValidationError::EmptyRegionCode => "EmptyRegionCode",
+            ValidationError::InvalidRegionCode { .. } => "InvalidRegionCode",
+            ValidationError::RevisionTooLow => "RevisionTooLow",
+            ValidationError::EmptyTargetRoot => "EmptyTargetRoot",
+            ValidationError::TargetRootNotAbsolute { .. } => "TargetRootNotAbsolute",
+            ValidationError::MaxAttemptsTooLow => "MaxAttemptsTooLow",
+        }
+    }
+
+    #[test]
+    fn every_validation_error_renders_a_message_an_operator_can_act_on() {
+        let table = every_variant_with_its_fragment();
+
+        let mut names: Vec<&str> = table.iter().map(|(e, _)| variant_name(e)).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            16,
+            "every ValidationError variant needs a row: {names:?}"
+        );
+
+        for (error, fragment) in &table {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(fragment),
+                "{} rendered as {rendered:?}, which does not contain {fragment:?}",
+                variant_name(error)
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_report_renders_as_nothing_at_all() {
+        assert_eq!(ValidationReport::new(Vec::new()).to_string(), "");
+    }
+
     #[test]
     fn a_report_lists_every_fault_one_per_line() {
         let report = ValidationReport::new(vec![
