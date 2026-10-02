@@ -34,10 +34,10 @@ pub struct Subject {
 /// Produces a fresh, empty [`Subject`] for each case.
 ///
 /// An adapter backed by a database must give each case genuine isolation
-/// that is parallel-safe: its own schema or its own database. Truncating
-/// shared tables in `fresh()` will race against concurrent test cases, since
-/// cargo runs all cases in parallel by default. This guarantees the
-/// baffling interference the isolation requirement was meant to prevent.
+/// that is parallel-safe: its own schema, or its own database. Cargo runs
+/// every case in this binary concurrently, so truncating shared tables in
+/// `fresh()` races against every case still in flight — producing exactly
+/// the baffling interference that isolation is here to prevent.
 #[async_trait]
 pub trait Fixture: Send + Sync {
     async fn fresh(&self) -> Subject;
@@ -708,10 +708,9 @@ macro_rules! conformance_suite {
 #[doc(hidden)]
 macro_rules! conformance_case {
     ($fixture:expr, $case:ident) => {
-        /// A current-thread runtime cannot interleave claimants against an
-        /// adapter whose claim never yields, so the concurrency case would
-        /// silently test nothing. Multi-threaded flavor ensures concurrent
-        /// test execution is real against both in-memory and database adapters.
+        // The flavor is pinned, not incidental. A current-thread runtime
+        // cannot interleave claimants against an adapter whose claim never
+        // yields, so the concurrency case would pass while testing nothing.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $case() {
             let fixture = $fixture;
