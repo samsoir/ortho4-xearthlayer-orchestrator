@@ -38,6 +38,14 @@ impl Config {
             max_task_duration: TimeoutSeconds::new(self.max_task_duration_secs)?,
         })
     }
+
+    /// Validated reaper period. `tokio::time::interval` panics on zero,
+    /// so zero must be a startup error rather than a dead reaper.
+    pub fn reap_interval(&self) -> Result<std::time::Duration, InvalidQuantity> {
+        Ok(std::time::Duration::from_secs(
+            TimeoutSeconds::new(self.reap_interval_secs)?.get(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +89,28 @@ mod tests {
         let request = config.reap_request().expect("valid defaults");
         assert_eq!(request.heartbeat_timeout.get(), 120);
         assert_eq!(request.max_task_duration.get(), 21_600);
+    }
+
+    #[test]
+    fn a_zero_reap_interval_is_refused_before_the_server_binds() {
+        let config = Config::try_parse_from([
+            "oxo-controld",
+            "--database-url",
+            "postgres://x",
+            "--reap-interval-secs",
+            "0",
+        ])
+        .expect("clap accepts the number; the quantity refuses it");
+        assert!(config.reap_interval().is_err());
+    }
+
+    #[test]
+    fn the_default_reap_interval_is_thirty_seconds() {
+        let config = Config::try_parse_from(["oxo-controld", "--database-url", "postgres://x"])
+            .expect("parse");
+        assert_eq!(
+            config.reap_interval().expect("valid default"),
+            std::time::Duration::from_secs(30)
+        );
     }
 }

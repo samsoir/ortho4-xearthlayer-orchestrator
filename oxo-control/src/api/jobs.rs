@@ -2,8 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use oxo_spec::RegionSpec;
-use oxo_tasks::request::FindJob;
-use oxo_tasks::JobId;
+use oxo_tasks::{FindJob, JobId};
 use serde::Deserialize;
 use uuid::Uuid;
 

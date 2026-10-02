@@ -135,12 +135,28 @@ mod tests {
 
     #[test]
     fn planning_is_deterministic_for_an_unchanged_specification() {
+        // `spec` collects tiles into a BTreeSet, which normalises input
+        // order before `plan` runs: this pins purity over an equal set,
+        // not input-order independence.
         // create_job's idempotency compares task sets; a planner that
         // reordered between runs would still resume (comparison is
         // order-insensitive) but reproducibility is the promise here.
         let first = plan(&spec(&[(51, -2), (50, -2), (50, -3)], true)).expect("plan");
         let second = plan(&spec(&[(50, -3), (51, -2), (50, -2)], true)).expect("plan");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn tiles_at_the_representable_extremes_are_planned_verbatim() {
+        let job = plan(&spec(&[(-90, -180), (89, 179)], false)).expect("plan");
+        let tiles: Vec<_> = job.tasks.iter().map(|t| t.tile).collect();
+        assert_eq!(
+            tiles,
+            vec![
+                TileId::new(TileId::LAT_MIN, TileId::LON_MIN).unwrap(),
+                TileId::new(TileId::LAT_MAX, TileId::LON_MAX).unwrap(),
+            ]
+        );
     }
 
     #[test]

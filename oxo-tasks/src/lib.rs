@@ -24,8 +24,8 @@ pub use ids::{JobId, LeaseToken, TaskId};
 pub use memory::InMemoryTaskStore;
 pub use quantity::{BackoffSeconds, InvalidQuantity, MaxAttempts, TimeoutSeconds, MAX_SECONDS};
 pub use request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, TaskSpec, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, TaskSpec, Throughput,
 };
 pub use store::TaskStore;
 pub use task::{TaskState, TaskType};

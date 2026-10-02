@@ -156,7 +156,7 @@ Job status is a tagged object mirroring `JobStatus`:
 
 | Method and path | Request | Responses |
 |---|---|---|
-| `POST /api/v1/claims` | `{worker, task_types?}` — `task_types` absent means any; present-but-empty means none, matching the port | `200` `{task_id, job_id, lease_token, tile, task_type, attempt}`; `204` when nothing is claimable (not an error; the worker sleeps and asks again) |
+| `POST /api/v1/claims` | `{worker, task_types?}` — `task_types` absent means any; present-but-empty means none, matching the port | `200` `{task_id, job_id, lease_token, tile, task_type, attempt}`; `204` when nothing is claimable (not an error; the worker sleeps and asks again); `422` `unknown_task_type` for an unrecognized entry in `task_types` |
 | `POST /api/v1/tasks/{task_id}/heartbeat` | `{lease_token}` | `204`; `409`; `404` |
 | `POST /api/v1/tasks/{task_id}/complete` | `{lease_token}` | `204`; `409`; `404` |
 | `POST /api/v1/tasks/{task_id}/fail` | `{lease_token, reason}` | `200` `{outcome: "requeued", claimable_at, attempts_remaining}` or `{outcome: "abandoned"}`; `409`; `404` |

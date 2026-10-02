@@ -41,9 +41,8 @@ mod tests {
 
     use async_trait::async_trait;
     use oxo_spec::TileId;
-    use oxo_tasks::request::FindJob;
     use oxo_tasks::{
-        BackoffSeconds, ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest,
+        BackoffSeconds, ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob,
         InMemoryTaskStore, JobCreated, JobId, JobStatus, Lease, MaxAttempts, ReapOutcome,
         ReapRequest, TaskSpec, TaskStore, TaskStoreError, TaskType, TestClock, Throughput,
         TimeoutSeconds,
