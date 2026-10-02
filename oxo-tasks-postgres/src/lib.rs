@@ -156,23 +156,17 @@ impl TaskStore for PostgresTaskStore {
         }
 
         let now = self.clock.now();
-        // Both conversions below are infallible: the columns are bigint, and
-        // every u32 fits in an i64. Saturating instead would be silent
+        // Every conversion below is infallible: the columns are bigint, a
+        // u32 fits in an i64, and the seconds types are bounded by
+        // MAX_SECONDS at construction. Saturating instead would be silent
         // corruption -- two different revisions mapping onto one stored value
         // would make two distinct jobs share an identity, and
         // (region_code, revision) is exactly what decides whether a request
         // resumes an existing job or starts a new one.
-        let max_attempts = i64::from(request.max_attempts);
+        let max_attempts = i64::from(request.max_attempts.get());
         let revision = i64::from(request.revision);
-        // A backoff is a u64 of seconds, which genuinely can exceed i64. It is
-        // refused rather than saturated, because a silently shortened backoff
-        // would let a failing tile burn its whole attempt budget at once.
-        let backoff_secs = i64::try_from(request.backoff.as_secs()).map_err(|_| {
-            TaskStoreError::Adapter(format!(
-                "backoff of {} seconds exceeds the representable range",
-                request.backoff.as_secs()
-            ))
-        })?;
+        let backoff_secs =
+            i64::try_from(request.backoff.get()).expect("bounded by MAX_SECONDS at construction");
 
         let mut tx = self.pool.begin().await.map_err(adapter)?;
 
@@ -432,12 +426,8 @@ impl TaskStore for PostgresTaskStore {
 
     async fn reap_expired(&self, request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
         let now = self.clock.now();
-        let heartbeat_cutoff = now
-            - chrono::Duration::from_std(request.heartbeat_timeout)
-                .unwrap_or(chrono::Duration::zero());
-        let duration_cutoff = now
-            - chrono::Duration::from_std(request.max_task_duration)
-                .unwrap_or(chrono::Duration::zero());
+        let heartbeat_cutoff = now - chrono_seconds(request.heartbeat_timeout.get());
+        let duration_cutoff = now - chrono_seconds(request.max_task_duration.get());
 
         // One statement so a concurrent reaper cannot double-count: each
         // expired row is updated by exactly one of them. The loser of a
@@ -509,4 +499,10 @@ impl TaskStore for PostgresTaskStore {
         let now = self.clock.now();
         self.tally(job_id, now).await
     }
+}
+
+fn chrono_seconds(seconds: u64) -> chrono::Duration {
+    chrono::Duration::seconds(
+        i64::try_from(seconds).expect("bounded by MAX_SECONDS at construction"),
+    )
 }
