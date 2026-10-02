@@ -160,6 +160,20 @@ mod tests {
                 "adapter",
             ),
         ];
+        let (_, body) = status_and_body(ApiError::from(TaskStoreError::Adapter(
+            "connection reset".into(),
+        )))
+        .await;
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection reset"));
+        let (_, body) =
+            status_and_body(ApiError::from(TaskStoreError::LeaseLost { task_id })).await;
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains(&task_id.to_string()));
         for (error, want_status, want_code) in cases {
             let label = format!("{error:?}");
             let (status, code) = status_and_code(ApiError::from(error)).await;
@@ -176,16 +190,21 @@ mod tests {
         assert_eq!(body["error"], "invalid_spec");
         assert_eq!(body["message"], report.as_str());
 
-        let (status, code) = status_and_code(ApiError::UnknownTaskType("mesh".into())).await;
+        let (status, body) = status_and_body(ApiError::UnknownTaskType("mesh".into())).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(code, "unknown_task_type");
+        assert_eq!(body["error"], "unknown_task_type");
+        assert_eq!(
+            body["message"],
+            "unknown task type \"mesh\"; expected \"ortho\" or \"overlay\""
+        );
 
-        let (status, code) = status_and_code(ApiError::NoSuchJob {
+        let (status, body) = status_and_body(ApiError::NoSuchJob {
             region_code: "NA".into(),
             revision: 3,
         })
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(code, "unknown_job");
+        assert_eq!(body["error"], "unknown_job");
+        assert_eq!(body["message"], "no job for region NA revision 3");
     }
 }

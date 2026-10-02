@@ -193,18 +193,31 @@ mod tests {
 
     #[test]
     fn a_claimed_task_serializes_its_tile_and_type_canonically() {
+        let (task_id, job_id, lease) = (
+            TaskId::generate(),
+            JobId::generate(),
+            LeaseToken::generate(),
+        );
         let claimed = ClaimedTask {
-            task_id: TaskId::generate(),
-            job_id: JobId::generate(),
-            lease: LeaseToken::generate(),
+            task_id,
+            job_id,
+            lease,
             tile: TileId::new(50, -2).expect("in range"),
             task_type: TaskType::Overlay,
             attempt: 1,
         };
         let body = serde_json::to_value(ClaimedTaskBody::from(claimed)).unwrap();
-        assert_eq!(body["tile"], "+50-002");
-        assert_eq!(body["task_type"], "overlay");
-        assert_eq!(body["attempt"], 1);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "task_id": task_id.as_uuid(),
+                "job_id": job_id.as_uuid(),
+                "lease_token": lease.as_uuid(),
+                "tile": "+50-002",
+                "task_type": "overlay",
+                "attempt": 1,
+            })
+        );
     }
 
     #[test]
@@ -220,12 +233,14 @@ mod tests {
             attempts_remaining: 2,
         }))
         .unwrap();
-        assert_eq!(requeued["outcome"], "requeued");
-        assert_eq!(requeued["attempts_remaining"], 2);
-        assert!(requeued["claimable_at"]
-            .as_str()
-            .unwrap()
-            .starts_with("2026-10-02T12:00:00"));
+        assert_eq!(
+            requeued,
+            serde_json::json!({
+                "outcome": "requeued",
+                "claimable_at": "2026-10-02T12:00:00Z",
+                "attempts_remaining": 2,
+            })
+        );
     }
 
     #[test]
@@ -235,10 +250,13 @@ mod tests {
         let none: ClaimBody =
             serde_json::from_str(r#"{"worker": "w1", "task_types": []}"#).unwrap();
         assert_eq!(none.task_types, Some(vec![]));
+        let some: ClaimBody =
+            serde_json::from_str(r#"{"worker": "w1", "task_types": ["ortho"]}"#).unwrap();
+        assert_eq!(some.task_types, Some(vec!["ortho".to_string()]));
     }
 
     #[test]
-    fn the_remaining_bodies_round_trip_their_contract_shapes() {
+    fn the_remaining_bodies_match_their_contract_shapes() {
         let id = uuid::Uuid::nil();
         let created = serde_json::to_value(JobCreatedBody::from(JobCreated {
             job_id: JobId::from_uuid(id),
