@@ -174,19 +174,18 @@ already in flight, which matters when a job lasts weeks.
 jobs
   id            uuid primary key
   region_code   text        ─┐ unique together
-  revision      integer     ─┘
-  max_attempts  integer        snapshot of the spec's failure policy
+  revision      bigint      ─┘
+  max_attempts  bigint         snapshot of the spec's failure policy
   backoff_secs  bigint         snapshot
-  total_tasks    integer
   created_at    timestamptz
 
 tasks
   id                uuid primary key
   job_id            uuid references jobs
   tile              text           canonical TileId form
-  task_type          task_type       'ortho' | 'overlay'
-  state             task_state      'pending'|'claimed'|'succeeded'|'abandoned'
-  attempts          integer        starts, not failures
+  task_type         text           'ortho' | 'overlay', CHECK-constrained
+  state             text           'pending'|'claimed'|'succeeded'|'abandoned', CHECK-constrained
+  attempts          bigint         starts, not failures
   claimable_at      timestamptz    gates backoff
   lease_token       uuid           null unless claimed
   claimed_by        text           worker identity, null unless claimed
@@ -195,6 +194,16 @@ tasks
   last_failure      text           null until a failure is recorded
   unique (job_id, tile, task_type)
 ```
+
+`task_type` and `state` are `text` with a `CHECK` constraint rather than
+PostgreSQL enum types: a `sqlx` enum mapping requires `sqlx::Type` on the
+Rust enums, which would drag `sqlx` into `oxo-tasks` and break the
+dependency boundary the crate split (port vs. adapter) exists to
+maintain. `revision`, `max_attempts` and `attempts` are `bigint` rather
+than `integer` because the port carries `u32`/`u64` values that do not
+fit a signed 32-bit column. There is no `jobs.total_tasks` column; the
+adapter answers with `count(*) FROM tasks WHERE job_id = $1` instead, so
+there is nothing to keep in sync with the task set.
 
 A partial index on `(claimable_at, id) where state = 'pending'` serves
 the claim query; one on `(last_heartbeat_at) where state = 'claimed'`
@@ -205,17 +214,20 @@ serves the reaper. Both are the hot paths and nothing else is.
 ```sql
 UPDATE tasks SET
     state = 'claimed', lease_token = $1, claimed_by = $2,
-    claimed_at = $4, last_heartbeat_at = $4, attempts = attempts + 1
+    claimed_at = $3, last_heartbeat_at = $3, attempts = attempts + 1
 WHERE id = (
     SELECT id FROM tasks
-    WHERE state = 'pending' AND claimable_at <= $4
-      AND ($3::task_type[] IS NULL OR task_type = ANY($3))
+    WHERE state = 'pending' AND claimable_at <= $3
+      AND ($4::text[] IS NULL OR task_type = ANY($4))
     ORDER BY claimable_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
 RETURNING id, job_id, tile, task_type, attempts;
 ```
+
+(`$4::text[]`, not `$3::task_type[]` — `task_type` is `text` with a
+`CHECK`, not an enum type; see Schema above for why.)
 
 `FOR UPDATE SKIP LOCKED` is PostgreSQL's own documented idiom for
 handing one row to exactly one of many concurrent consumers. Ordering is

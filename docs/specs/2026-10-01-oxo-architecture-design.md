@@ -426,8 +426,13 @@ self-assessment in a pulling pod achieves the same throttling.
 max-deliver retry limits natively, in one light clusterable binary.
 Rejected for v1: a queue is not a database, so task state and the
 completion gate need a store alongside it -- two systems where one
-suffices. Retained as a plausible future adapter behind the
-job-server port, which is why that port exists.
+suffices. As built, the job-server port requires stored-task-set
+comparison for `create_job` idempotency, per-job state aggregates for
+`job_status` and `throughput`, and attempt accounting -- none of which
+a message queue provides without that companion store, the pairing
+this rejection is about. The port is therefore an honest *database*
+port, not a substrate port; a future adapter is anything that answers
+those queries, such as SQLite, not a queue.
 
 **Temporal.** The strongest conformance to "no bespoke task system",
 with durability, retries and heartbeats as the product. Rejected:
