@@ -172,6 +172,18 @@ re-run once per mistake. This shapes the API: validation yields a
 collection of errors, each carrying enough location information to
 point at the offending tile or key.
 
+That promise covers **validation faults**, and only those. A **schema
+fault** -- a type error, an unknown key, a missing section -- is reported
+first-only, by construction: deserialization stops at the first one serde
+meets, and nothing downstream of it has a model to validate. A file
+carrying `revision = "one"` plus eight validation faults therefore reports
+the type error alone. The two-stage shape (deserialize to strings, then
+validate) is what rescues the high-cardinality tile case, where reporting
+one malformed identifier per run would be intolerable; it does not and
+cannot rescue schema faults. The CLI's parse-failure message says so
+explicitly, so that an operator does not read a schema fault as the only
+problem with the file.
+
 ## Serialization
 
 **TOML is the canonical on-disk format.** It is serde-native, it is
