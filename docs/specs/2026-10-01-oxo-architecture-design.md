@@ -303,7 +303,7 @@ tests a far better surface than a broker protocol.
 | Work location | Ephemeral scratch, egress to durable volume | Local intermediate I/O; wholesale cleanup; no partial state in the delivered tree |
 | DEM cache | Persistent and shared across pods | Elevation data spans more than one tile, so re-downloading per job is pure waste |
 | Execution mode | Recycle or stop, per configuration | The README's container-lifetime tension is a parameter, not a design choice |
-| Job substrate | Postgres behind a job-server port | Specs, the completion gate and throughput are all queries; one store beats a store plus a broker |
+| Job substrate | Postgres behind a job-server port: a domain `jobs` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, leases held by heartbeat rather than a fixed duration | Specs, the completion gate and throughput are all queries; one store beats a store plus a broker. Settled in the job server design after a survey found no mature Rust Postgres queue crate, and none able to answer the domain questions this system asks |
 | Failure detection | Artifacts and output markers | Ortho4XP's headless path exits 0 on every failure |
 | Spec convention | `docs/specs/YYYY-MM-DD-<topic>-design.md`, plans in `docs/plans/` | Matches the author's established convention across sibling projects |
 | End user documentation | Lives in `docs/`, completed once the function is completed to provide end users guidance on functionality. | End user docs must be written only when the api and ux are stable. |
@@ -341,7 +341,14 @@ interface.
 - **Per-tile resource estimation.** Admission control needs an
   expected footprint per tile, presumably a function of zoom level,
   provider and whether overlays are included. Spike 0 supplies the
-  numbers; the model is sub-project 2's problem.
+  numbers. **Amended:** this was assigned to sub-project 2, which cannot
+  carry it — the numbers do not exist until spike 0 runs, and the
+  consumer is the worker's capacity self-check rather than the job store.
+  Until then a worker expresses capacity by filtering the job types it
+  will claim, which is sufficient because an overlay job's footprint is a
+  small fraction of an ortho job's. When the numbers exist the estimate
+  becomes a column on the job record and a predicate in the claim query,
+  which is additive.
 - **DEM cache concurrency and accounting.** Safe shared access for
   concurrent pods, and a bound on its growth.
 - **Retry classification.** Whether a usable transient-versus-permanent
