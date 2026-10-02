@@ -3315,14 +3315,19 @@ Create `oxo-tasks-postgres/migrations/0001_tasks.sql`:
 CREATE TABLE jobs (
     id           uuid        PRIMARY KEY,
     region_code  text        NOT NULL,
-    -- A u32 in Rust. Without this CHECK an out-of-range revision casts to a
-    -- negative i32 and inserts silently, corrupting the identity that the
-    -- UNIQUE below is meant to protect. The other numeric columns are already
-    -- covered by their own lower bounds.
-    revision     integer     NOT NULL CHECK (revision >= 1),
+    -- bigint, not integer: the port's revision is a u32, which does not fit
+    -- in a signed 32-bit column. Widening it means the conversion is
+    -- infallible, so no value the in-memory adapter accepts can be narrowed,
+    -- saturated or wrapped on the way in here. The CHECK guards
+    -- representability only -- a negative value could arrive solely from a
+    -- coding error. The meaningful lower bounds (revision >= 1,
+    -- max_attempts >= 1) live in oxo-spec's validation, which is the layer
+    -- that knows what these numbers mean; if the port ever adopts them, both
+    -- adapters and a conformance case should take them on together.
+    revision     bigint      NOT NULL CHECK (revision >= 0),
     -- Snapshotted from the specification's failure policy, so editing a
     -- specification cannot change the policy of a job already in flight.
-    max_attempts integer     NOT NULL CHECK (max_attempts >= 1),
+    max_attempts bigint      NOT NULL CHECK (max_attempts >= 0),
     backoff_secs bigint      NOT NULL CHECK (backoff_secs >= 0),
     created_at   timestamptz NOT NULL,
     UNIQUE (region_code, revision)
@@ -3335,7 +3340,7 @@ CREATE TABLE tasks (
     task_type          text        NOT NULL CHECK (task_type IN ('ortho', 'overlay')),
     state             text        NOT NULL CHECK (state IN ('pending', 'claimed', 'succeeded', 'abandoned')),
     -- Counts starts, not failures: incremented at claim.
-    attempts          integer     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    attempts          bigint      NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     claimable_at      timestamptz NOT NULL,
     lease_token       uuid,
     claimed_by        text,
@@ -3543,6 +3548,7 @@ EOF
 **Files:**
 - Modify: `oxo-tasks-postgres/src/lib.rs`
 - Modify: `oxo-tasks-postgres/tests/conformance_postgres.rs`
+- Modify: `oxo-tasks-postgres/migrations/0001_tasks.sql` — `revision`, `max_attempts` and `attempts` become `bigint`, and their CHECKs become `>= 0`. Task 9 shipped them as `integer`, which cannot hold the `u32` the port actually carries. Edit the migration in place: no database outside the disposable container has ever applied it. The conversions in this task depend on the wider columns, so the two changes land together.
 
 **Interfaces:**
 - Produces: `create_job` and `claim` replacing their stubs, with behaviour identical to the in-memory adapter.
@@ -3644,15 +3650,28 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         }
 
         let now = self.clock.now();
-        let backoff_secs =
-            i64::try_from(request.backoff.as_secs()).unwrap_or(i64::MAX);
-        let max_attempts = i32::try_from(request.max_attempts).unwrap_or(i32::MAX);
-        let revision = i32::try_from(request.revision).unwrap_or(i32::MAX);
+        // Both conversions below are infallible: the columns are bigint, and
+        // every u32 fits in an i64. Saturating instead would be silent
+        // corruption -- two different revisions mapping onto one stored value
+        // would make two distinct jobs share an identity, and
+        // (region_code, revision) is exactly what decides whether a request
+        // resumes an existing job or starts a new one.
+        let max_attempts = i64::from(request.max_attempts);
+        let revision = i64::from(request.revision);
+        // A backoff is a u64 of seconds, which genuinely can exceed i64. It is
+        // refused rather than saturated, because a silently shortened backoff
+        // would let a failing tile burn its whole attempt budget at once.
+        let backoff_secs = i64::try_from(request.backoff.as_secs()).map_err(|_| {
+            TaskStoreError::Adapter(format!(
+                "backoff of {} seconds exceeds the representable range",
+                request.backoff.as_secs()
+            ))
+        })?;
 
         let mut tx = self.pool.begin().await.map_err(adapter)?;
 
         // Lock the identity so two concurrent creations cannot both insert.
-        let existing: Option<(Uuid, i32, i64)> = sqlx::query_as(
+        let existing: Option<(Uuid, i64, i64)> = sqlx::query_as(
             "SELECT id, max_attempts, backoff_secs FROM jobs \
              WHERE region_code = $1 AND revision = $2 FOR UPDATE",
         )
@@ -3763,7 +3782,7 @@ Replace the stub:
                 .collect()
         });
 
-        let row: Option<(Uuid, Uuid, String, String, i32)> = sqlx::query_as(
+        let row: Option<(Uuid, Uuid, String, String, i64)> = sqlx::query_as(
             "UPDATE tasks SET \
                  state = 'claimed', lease_token = $1, claimed_by = $2, \
                  claimed_at = $3, last_heartbeat_at = $3, attempts = attempts + 1 \
@@ -3926,7 +3945,7 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
         let mut tx = self.pool.begin().await.map_err(adapter)?;
         Self::resolve(&mut *tx, request.lease).await?;
 
-        let (attempts, max_attempts, backoff_secs): (i32, i32, i64) = sqlx::query_as(
+        let (attempts, max_attempts, backoff_secs): (i64, i64, i64) = sqlx::query_as(
             "SELECT j.attempts, r.max_attempts, r.backoff_secs \
              FROM tasks j JOIN jobs r ON r.id = j.job_id WHERE j.id = $1",
         )
