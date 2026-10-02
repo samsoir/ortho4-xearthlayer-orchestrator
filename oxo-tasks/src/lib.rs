@@ -12,6 +12,7 @@
 pub mod clock;
 pub mod error;
 pub mod ids;
+pub mod memory;
 pub mod request;
 pub mod store;
 pub mod task;
@@ -19,6 +20,7 @@ pub mod task;
 pub use clock::{Clock, SystemClock, TestClock};
 pub use error::TaskStoreError;
 pub use ids::{JobId, LeaseToken, TaskId};
+pub use memory::InMemoryTaskStore;
 pub use request::{
     ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
     ReapOutcome, ReapRequest, TaskSpec, Throughput,
