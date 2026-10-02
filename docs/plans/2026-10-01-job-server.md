@@ -2433,6 +2433,7 @@ EOF
 - Create: `oxo-tasks/tests/conformance_memory.rs`
 - Modify: `oxo-tasks/src/lib.rs`
 - Modify: `oxo-tasks/Cargo.toml`
+- Modify: `Makefile` (the `test` and `test-strict` targets, Step 5)
 
 **Interfaces:**
 - Produces: a `conformance` feature; `Subject { store, clock }`; the `Fixture` trait with `async fn fresh(&self) -> Subject`; one `pub async fn` per invariant; and the `conformance_suite!` macro, which expands to one `#[tokio::test]` per case.
