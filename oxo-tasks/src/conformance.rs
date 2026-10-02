@@ -382,6 +382,51 @@ pub async fn an_unknown_task_is_refused_by_every_reporting_call(fixture: &dyn Fi
     }
 }
 
+/// Several creators of one brand-new job must agree on the outcome.
+///
+/// Not hypothetical for OXO: dispatch is pull, so several pods can call
+/// `create_job` for the same region and revision as they start. Exactly one
+/// must create it and the rest must resume it, all naming the same job and
+/// the same task count. A store that looks for the identity and only then
+/// inserts cannot promise this -- `SELECT ... FOR UPDATE` locks rows that
+/// exist, and a brand-new identity has none -- so every caller finds
+/// nothing, all of them insert, and the losers get a constraint violation
+/// where the contract says they should resume.
+pub async fn concurrent_creation_of_one_job_happens_once(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let store: Arc<dyn TaskStore> = Arc::from(subject.store);
+
+    let mut creators = Vec::new();
+    for _ in 0..4 {
+        let store = Arc::clone(&store);
+        creators.push(tokio::spawn(async move {
+            store.create_job(two_task_job()).await
+        }));
+    }
+
+    let mut outcomes = Vec::new();
+    for creator in creators {
+        outcomes.push(
+            creator
+                .await
+                .expect("creator did not panic")
+                .expect("create_job either creates the job or resumes it, never fails"),
+        );
+    }
+
+    let created = outcomes.iter().filter(|outcome| outcome.created).count();
+    assert_eq!(created, 1, "exactly one caller created the job");
+
+    let job_id = outcomes[0].job_id;
+    for outcome in &outcomes {
+        assert_eq!(outcome.job_id, job_id, "every caller names the same job");
+        assert_eq!(
+            outcome.total_tasks, 2,
+            "every caller sees the whole task set, including the ones that resumed"
+        );
+    }
+}
+
 pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
@@ -678,6 +723,7 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, a_changed_task_set_under_one_identity_conflicts);
         $crate::conformance_case!($fixture, a_job_with_no_tasks_is_refused);
         $crate::conformance_case!($fixture, a_job_with_a_duplicated_task_is_refused);
+        $crate::conformance_case!($fixture, concurrent_creation_of_one_job_happens_once);
         $crate::conformance_case!($fixture, every_task_is_handed_out_exactly_once);
         $crate::conformance_case!($fixture, an_empty_queue_yields_none_not_an_error);
         $crate::conformance_case!($fixture, a_task_type_filter_is_honoured);

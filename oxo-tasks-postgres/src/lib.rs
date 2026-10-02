@@ -92,35 +92,74 @@ impl TaskStore for PostgresTaskStore {
 
         let mut tx = self.pool.begin().await.map_err(adapter)?;
 
-        // Lock the identity so two concurrent creations cannot both insert.
-        let existing: Option<(Uuid, i64, i64)> = sqlx::query_as(
-            "SELECT id, max_attempts, backoff_secs FROM jobs \
-             WHERE region_code = $1 AND revision = $2 FOR UPDATE",
+        // Insert first, then fall back to resuming. The obvious order --
+        // look for the identity, then insert if absent -- does not work
+        // here: `SELECT ... FOR UPDATE` locks rows that EXIST, so a
+        // brand-new identity has no row to lock, two concurrent creators
+        // both find nothing, and both insert. One then receives a bare
+        // unique violation where the in-memory adapter, serialised by its
+        // mutex, resumes. That is not hypothetical for OXO, where dispatch
+        // is pull and several pods can call create_job for the same region
+        // as they start.
+        //
+        // Inserting first makes the unique index itself the arbiter. The
+        // loser's statement waits for the winner's transaction to finish;
+        // if it committed, DO NOTHING applies and we fall through to the
+        // resume path, where the winner's tasks are already visible because
+        // they were committed in the same transaction. If it aborted, no
+        // conflict remains and this insert simply succeeds. The fall-through
+        // relies on READ COMMITTED, PostgreSQL's default, where each
+        // statement sees the latest committed data.
+        let job_uuid = Uuid::new_v4();
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (region_code, revision) DO NOTHING \
+             RETURNING id",
         )
+        .bind(job_uuid)
         .bind(&request.region_code)
         .bind(revision)
+        .bind(max_attempts)
+        .bind(backoff_secs)
+        .bind(now)
         .fetch_optional(&mut *tx)
         .await
         .map_err(adapter)?;
 
-        if let Some((job_uuid, existing_attempts, existing_backoff)) = existing {
-            let job_id = JobId::from_uuid(job_uuid);
+        if inserted.is_none() {
+            // DO NOTHING fired, so a committed row holds this identity --
+            // an aborted one would have left no conflict and let the insert
+            // through. Reading it back cannot come up empty.
+            let (existing_uuid, existing_attempts, existing_backoff): (Uuid, i64, i64) =
+                sqlx::query_as(
+                    "SELECT id, max_attempts, backoff_secs FROM jobs \
+                     WHERE region_code = $1 AND revision = $2",
+                )
+                .bind(&request.region_code)
+                .bind(revision)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(adapter)?;
+
             let rows: Vec<(String, String)> =
                 sqlx::query_as("SELECT tile, task_type FROM tasks WHERE job_id = $1")
-                    .bind(job_uuid)
+                    .bind(existing_uuid)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(adapter)?;
 
             let mut existing_set: Vec<(String, String)> = rows;
             existing_set.sort();
+            // No dedup: the duplicate guard at the top of this function has
+            // already proved the request carries no repeated pair, and the
+            // table's UNIQUE constraint says the same of the stored side.
             let mut requested: Vec<(String, String)> = request
                 .tasks
                 .iter()
                 .map(|spec| (spec.tile.to_string(), spec.task_type.as_str().to_string()))
                 .collect();
             requested.sort();
-            requested.dedup();
 
             let same_policy = existing_attempts == max_attempts && existing_backoff == backoff_secs;
             if existing_set != requested || !same_policy {
@@ -133,32 +172,22 @@ impl TaskStore for PostgresTaskStore {
             tx.commit().await.map_err(adapter)?;
             let total_tasks = u32::try_from(existing_set.len()).unwrap_or(u32::MAX);
             return Ok(JobCreated {
-                job_id,
+                job_id: JobId::from_uuid(existing_uuid),
                 created: false,
                 total_tasks,
             });
         }
 
-        let job_uuid = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(job_uuid)
-        .bind(&request.region_code)
-        .bind(revision)
-        .bind(max_attempts)
-        .bind(backoff_secs)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(adapter)?;
-
         for spec in &request.tasks {
             sqlx::query(
+                // No ON CONFLICT clause. The duplicate guard makes a
+                // collision within one request impossible, and job_uuid is
+                // freshly minted so it cannot collide across jobs. A
+                // conflict here would mean an assumption has broken, and
+                // should fail loudly rather than quietly create fewer tasks
+                // than were asked for.
                 "INSERT INTO tasks (id, job_id, tile, task_type, state, attempts, claimable_at) \
-                 VALUES ($1, $2, $3, $4, 'pending', 0, $5) \
-                 ON CONFLICT (job_id, tile, task_type) DO NOTHING",
+                 VALUES ($1, $2, $3, $4, 'pending', 0, $5)",
             )
             .bind(Uuid::new_v4())
             .bind(job_uuid)
