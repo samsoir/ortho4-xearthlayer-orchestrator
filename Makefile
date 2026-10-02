@@ -15,11 +15,11 @@ check: ## Fast compile check, no codegen
 
 .PHONY: test
 test: ## Run all tests
-	$(CARGO) test --workspace --all-targets
+	$(CARGO) test --workspace --all-targets --all-features
 
 .PHONY: test-strict
 test-strict: ## Run all tests with warnings as errors (matches CI)
-	RUSTFLAGS="-D warnings" $(CARGO) test --workspace --all-targets
+	RUSTFLAGS="-D warnings" $(CARGO) test --workspace --all-targets --all-features
 
 .PHONY: format
 format: ## Format code

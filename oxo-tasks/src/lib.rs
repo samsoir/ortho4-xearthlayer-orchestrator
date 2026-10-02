@@ -27,3 +27,6 @@ pub use request::{
 };
 pub use store::TaskStore;
 pub use task::{TaskState, TaskType};
+
+#[cfg(feature = "conformance")]
+pub mod conformance;
