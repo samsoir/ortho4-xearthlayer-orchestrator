@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The repository holds a Cargo workspace alongside the documents it was planned from: `README.md` (the high-level specification), `docs/specs/` (design documents and decision records), and `docs/plans/` (implementation plans).
 
-Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.74):
+Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.75):
 
 | Crate | Role |
 |---|---|
 | `oxo-spec` | Region specification model and static validation — sub-project 1. A **pure library**: no filesystem, no network, no clock. The model is in `oxo-spec/src/` (`tile.rs`, `metadata.rs`, `parameters.rs`, `policy.rs`, `target.rs`, `raw.rs`, `spec.rs`), every validation rule in `oxo-spec/src/validate.rs`. |
 | `oxo-spec-cli` | Thin CLI over that library, binary `oxo-spec`, subcommands `validate` and `show`. This is the component that reads files; the library never does. |
-| `oxo-tasks` | The job-server port — sub-project 2. Domain types, an eight-method `TaskStore` trait, an in-memory adapter (`memory.rs`), and a shared conformance suite (`conformance.rs`) behind the `conformance` feature that every adapter is held to. |
+| `oxo-tasks` | The job-server port — sub-project 2. Domain types, the `TaskStore` trait, an in-memory adapter (`memory.rs`), and a shared conformance suite (`conformance.rs`) behind the `conformance` feature that every adapter is held to. |
 | `oxo-tasks-postgres` | The PostgreSQL adapter for that port, held to the same conformance suite against a real database. |
+| `oxo-control` | The control plane library — sub-project 3. The planner, the HTTP API as an `axum::Router` over an injected `Arc<dyn TaskStore>`, the wire types, the error mapping, and the reaper loop. Never depends on `sqlx` or `oxo-tasks-postgres`. |
+| `oxo-controld` | The control plane binary — the composition root. Parses configuration, connects the PostgreSQL adapter, builds the router, spawns the reaper, serves. The only new code that knows PostgreSQL exists. |
 
 Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them):
 
@@ -22,10 +24,11 @@ Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them)
 - `make test` (all tests), `make lint` (clippy), `make format` / `make format-check`, `make build`, `make check`, `make coverage` (needs `cargo-llvm-cov`), `make clean`.
 - `make pg-up` / `make pg-down` — start/stop a disposable PostgreSQL in Podman for the adapter tests.
 - `make verify-db` — brings PostgreSQL up, runs the `oxo-tasks-postgres` conformance suite against it, then tears it down.
+- The daemon runs as `cargo run -p oxo-controld -- --database-url …`; `--help` lists its flags and their environment-variable fallbacks.
 
 **`verify` and `verify-db` are deliberately separate, and a newcomer must know why.** `test`/`test-strict`/`verify` exclude `oxo-tasks-postgres` **by package name** (`--exclude oxo-tasks-postgres`), not by a runtime skip. That means a green `make verify` proves nothing about the PostgreSQL adapter — it was never compiled into that run. Only `make verify-db` exercises it, against a real, disposable database. The exclusion is by name specifically so the gap is visible in which target you ran, rather than hidden behind tests that silently no-op without a `DATABASE_URL`.
 
-Currently passing: `make verify` runs 149 Rust tests (`oxo-spec`: 81 across its lib, CLI and `validation.rs` suites; `oxo-tasks`: 47 lib tests plus the 21-case conformance suite against the in-memory adapter) plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`). `make verify-db` runs 22 tests against PostgreSQL — the same 21 conformance cases plus a migration-idempotency test.
+Currently passing: `make verify` runs 194 Rust tests (`oxo-control`: 29 lib tests; `oxo-controld`: 4; `oxo-spec`: 81 across its lib, CLI and `validation.rs` suites; `oxo-tasks`: 53 lib tests plus the 27-case conformance suite against the in-memory adapter) plus 11 Gherkin acceptance scenarios (8 in `oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`; 3 for the control plane in `oxo-control/tests/acceptance.rs`). `make verify-db` runs 28 tests against PostgreSQL — the same 27 conformance cases plus a migration-idempotency test.
 
 Also note:
 
