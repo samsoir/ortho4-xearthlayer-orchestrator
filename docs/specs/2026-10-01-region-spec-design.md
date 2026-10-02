@@ -135,6 +135,13 @@ A pure function of the model. No filesystem, no network, no clock.
 - Zoom level is within Ortho4XP's supported band.
 - Provider code is syntactically well formed.
 - No raw key collides with a curated field.
+- Every raw key and value can be written into an Ortho4XP tile
+  configuration: no empty key, and no line break, `=` or control
+  character in a key, nor line break in a value. That file is one
+  setting per line parsed with `line.strip().split("=")`, so the write
+  side turns an embedded newline into an injected configuration line --
+  reproducing the silent-shadowing fault class the previous rule exists
+  to prevent.
 - Failure policy is coherent: at least one attempt, non-negative
   backoff.
 - The target location is a well-formed path.

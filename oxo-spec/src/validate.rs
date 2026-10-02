@@ -30,6 +30,14 @@ pub enum ValidationError {
         key: String,
         curated_field: &'static str,
     },
+    MalformedRawKey {
+        key: String,
+        reason: &'static str,
+    },
+    MalformedRawValue {
+        key: String,
+        reason: &'static str,
+    },
     EmptyName,
     EmptyRegionCode,
     InvalidRegionCode {
@@ -71,6 +79,16 @@ impl fmt::Display for ValidationError {
                 "raw override {key:?} is owned by the curated field \
                  {curated_field:?}; set {curated_field} instead of \
                  shadowing it"
+            ),
+            Self::MalformedRawKey { key, reason } => {
+                write!(
+                    f,
+                    "raw override key {key:?} cannot be written out: {reason}"
+                )
+            }
+            Self::MalformedRawValue { key, reason } => write!(
+                f,
+                "the value of raw override {key:?} cannot be written out: {reason}"
             ),
             Self::EmptyName => write!(f, "region name is empty"),
             Self::EmptyRegionCode => write!(f, "region code is empty"),
@@ -210,7 +228,60 @@ pub(crate) fn validate_parameters(
             });
         }
     }
+
+    validate_raw_entries(&parameters.raw, errors);
 }
+
+/// Check that every raw override can survive being written into an
+/// Ortho4XP tile configuration.
+///
+/// That file is line-oriented and parsed with `line.strip().split("=")`
+/// (`src/O4_Config_Utils.py:1413`, also 1444 and 1477), so an embedded
+/// newline in either half becomes a second configuration line — which is
+/// how a value such as `"bar\ndefault_zl=18"` silently shadows
+/// `default_zl`, exactly the fault class the reserved-key rule exists to
+/// prevent. A `=` in a key makes the same `split("=")` misread the key, and
+/// Ortho4XP swallows the resulting exception into a bare `Crash!` with no
+/// traceback.
+///
+/// This is a pure function of the model, so it is static validation and
+/// belongs here. Every offending entry is reported, not the first.
+fn validate_raw_entries(raw: &BTreeMap<String, String>, errors: &mut Vec<ValidationError>) {
+    for (key, value) in raw {
+        if let Some(reason) = raw_key_fault(key) {
+            errors.push(ValidationError::MalformedRawKey {
+                key: key.clone(),
+                reason,
+            });
+        }
+        if value.contains('\n') || value.contains('\r') {
+            errors.push(ValidationError::MalformedRawValue {
+                key: key.clone(),
+                reason: LINE_BREAK_REASON,
+            });
+        }
+    }
+}
+
+/// Why Ortho4XP could not be handed this raw key, or `None` if it can.
+fn raw_key_fault(key: &str) -> Option<&'static str> {
+    if key.is_empty() {
+        Some("an override key cannot be empty")
+    } else if key.contains('\n') || key.contains('\r') {
+        Some(LINE_BREAK_REASON)
+    } else if key.contains('=') {
+        Some("Ortho4XP splits each configuration line on '=', so a key cannot contain one")
+    } else if key.chars().any(char::is_control) {
+        Some("a key cannot contain control characters")
+    } else {
+        None
+    }
+}
+
+/// Shared because a newline fails for one reason in a key and a value.
+const LINE_BREAK_REASON: &str =
+    "Ortho4XP's tile configuration is one setting per line, so a line break \
+     would inject a second setting";
 
 fn is_well_formed_provider_code(code: &str) -> bool {
     code.len() <= 64
@@ -505,6 +576,81 @@ mod tests {
         );
         validate_parameters(&p, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn an_empty_raw_key_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert(String::new(), "empty key".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::MalformedRawKey {
+                key: String::new(),
+                reason: "an override key cannot be empty",
+            }]
+        );
+    }
+
+    #[test]
+    fn a_raw_key_carrying_a_line_break_an_equals_or_a_control_character_is_a_fault() {
+        for key in ["foo\nbar", "foo\rbar", "foo=bar", "foo\u{7}bar"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert(key.to_string(), "value".to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors.len(),
+                1,
+                "expected {key:?} to be rejected once: {errors:?}"
+            );
+            assert!(
+                matches!(
+                    &errors[0],
+                    ValidationError::MalformedRawKey { key: reported, .. } if reported == key
+                ),
+                "expected {key:?} to be rejected: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_value_carrying_a_line_break_is_a_fault() {
+        for value in ["bar\ndefault_zl=18", "bar\rdefault_zl=18"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert("foo".to_string(), value.to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::MalformedRawValue {
+                    key: "foo".to_string(),
+                    reason: LINE_BREAK_REASON,
+                }],
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_equals_sign_in_a_raw_value_is_accepted_because_ortho4xp_keeps_the_first_split() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert("custom_dem".to_string(), "a=b".to_string());
+        validate_parameters(&p, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn every_malformed_raw_entry_is_reported_not_just_the_first() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert(String::new(), "fine".to_string());
+        p.raw.insert("a=b".to_string(), "fine".to_string());
+        p.raw.insert("good".to_string(), "two\nlines".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(errors.len(), 3, "{errors:?}");
     }
 
     fn metadata() -> Metadata {
