@@ -3846,7 +3846,7 @@ Expected: the creation, claim, filter, empty-queue and concurrency cases PASS; t
 ```bash
 git add oxo-tasks-postgres/
 git commit -F - <<'EOF'
-feat(tasks-pg): create runs idempotently and claim with SKIP LOCKED
+feat(tasks-pg): create jobs idempotently and claim with SKIP LOCKED
 
 create_job locks the (region_code, revision) identity before deciding, so
 two concurrent creations cannot both insert, and compares the stored task
@@ -4203,7 +4203,7 @@ git commit -F - <<'EOF'
 feat(tasks-pg): answer the completion gate and the throughput snapshot
 
 Both read one aggregate query with FILTER clauses, so the gate and the
-snapshot cannot disagree about a job. An unknown run is refused rather
+snapshot cannot disagree about a job. An unknown job is refused rather
 than reported as an empty-and-therefore-complete one.
 
 The conformance suite now passes in full against both adapters: fifteen
