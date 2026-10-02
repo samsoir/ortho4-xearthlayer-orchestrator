@@ -38,12 +38,12 @@ Summarised here because it is the thing most likely to be re-derived incorrectly
 
 - The control plane owns an Ortho4XP **pod spec**. "Pod" is the portable unit: Podman and Kubernetes both consume one. There is no abstraction over container runtimes beyond the pod spec, and no second execution driver.
 - **Configuration is injected at pod start.** Pods carry none, so configuration drift between workers is not representable.
-- **Dispatch is pull.** A pod self-initializes, self-checks capacity, and claims a job only if it has room. Disk pressure therefore throttles the system without any central scheduler.
-- **Two job types: ortho and overlay.** A tile's ortho production and its overlay extraction are separate jobs, because they share no data, their resource profiles differ by orders of magnitude, and their dependencies are disjoint. The planner emits up to 2N jobs from N tiles; `include_overlays = false` yields N ortho jobs and is a first-class option, not a degraded mode. There is no overlays-only mode (that would be incremental production, which is out of scope).
+- **Dispatch is pull.** A pod self-initializes, self-checks capacity, and claims a task only if it has room. Disk pressure therefore throttles the system without any central scheduler.
+- **Two task types: ortho and overlay.** A tile's ortho production and its overlay extraction are separate tasks, because they share no data, their resource profiles differ by orders of magnitude, and their dependencies are disjoint. The planner emits up to 2N tasks from N tiles; `include_overlays = false` yields N ortho tasks and is a first-class option, not a degraded mode. There is no overlays-only mode (that would be incremental production, which is out of scope).
 - **The platform starts and scales pods, not OXO.** OXO holds no container runtime credentials. It serves work and owns the throughput signal (queue depth, claim/completion/failure rates); scaling automation is out of scope for v1 but the throughput contract is kept open for it.
 - **Three volumes:** ephemeral `scratch` (wiped wholesale on cleanup), durable `artifacts` (the deliverable), and a shared persistent `dem-cache` (the one deliberate exception to pod statelessness).
 - **Execution mode** decides recycle or stop after cleanup.
-- **Job state sits behind a job-server port**, with Postgres as the v1 adapter. The control plane depends on the port, never on Postgres. Pods never reach the persistence layer; they claim and report through the OXO API.
+- **Task state sits behind a job-server port**, with Postgres as the v1 adapter. The control plane depends on the port, never on Postgres. Pods never reach the persistence layer; they claim and report through the OXO API.
 
 ### Assume a homogeneous container platform
 
@@ -51,15 +51,15 @@ Design input is limited to: **a homogeneous platform that can run containers und
 
 ### Why the atomic unit is one 1×1 tile
 
-Ortho4XP's headless entry point is per-tile: `python3 Ortho4XP.py <lat> <lon> [provider_code] [zoomlevel]` runs `build_poly_file → build_mesh → build_masks → build_tile` for a single tile and exits. The job boundary mirrors the tool's own boundary, which is what makes jobs retryable and workers stateless. That is a property of the tool, not a choice.
+Ortho4XP's headless entry point is per-tile: `python3 Ortho4XP.py <lat> <lon> [provider_code] [zoomlevel]` runs `build_poly_file → build_mesh → build_masks → build_tile` for a single tile and exits. The task boundary mirrors the tool's own boundary, which is what makes tasks retryable and workers stateless. That is a property of the tool, not a choice.
 
 ### Overlays are separate work, and unreachable from the headless CLI
 
 `Ortho4XP.py` calls `build_tile` and stops — it never builds overlays. Extraction is gated on a `do_ovl` *function argument* to `O4_Tile_Utils.build_tile_list` (a batch routine the GUI drives), so a worker must call `O4_Overlay_Utils.build_overlay(lat, lon)` itself.
 
-That function reads only X-Plane's shipped scenery (`custom_overlay_src/Earth nav data/<tile>.dsf`, falling back to `custom_overlay_src_alternate`), a tmp dir and DSFTool. It touches nothing the ortho pipeline produces, and writes to a separate tree — `yOrtho4XP_Overlays/Earth nav data/<10° block>/` versus the ortho tile's `zOrtho4XP_<tile>/`. Hence two independent job types.
+That function reads only X-Plane's shipped scenery (`custom_overlay_src/Earth nav data/<tile>.dsf`, falling back to `custom_overlay_src_alternate`), a tmp dir and DSFTool. It touches nothing the ortho pipeline produces, and writes to a separate tree — `yOrtho4XP_Overlays/Earth nav data/<10° block>/` versus the ortho tile's `zOrtho4XP_<tile>/`. Hence two independent task types.
 
-**Concurrency hazard:** overlay output is grouped into 10° blocks by `round_latlon`, so every overlay job in one block writes into one shared directory, and Ortho4XP tests for it then creates it (`O4_Overlay_Utils.py:208-209`) — a TOCTOU race that one pod per job makes live. Create that directory idempotently; do not rely on Ortho4XP's check.
+**Concurrency hazard:** overlay output is grouped into 10° blocks by `round_latlon`, so every overlay task in one block writes into one shared directory, and Ortho4XP tests for it then creates it (`O4_Overlay_Utils.py:208-209`) — a TOCTOU race that one pod per task makes live. Create that directory idempotently; do not rely on Ortho4XP's check.
 
 ### Ortho4XP exits 0 on every failure
 
@@ -69,7 +69,7 @@ Therefore: **never use exit status to detect Ortho4XP failure.** The intended re
 
 ### Non-goals (hard boundaries)
 
-No bespoke distributed compute platform, job/task management system, or ortho tile processor. Use existing open-source frameworks and `Ortho4XP`. No Kubernetes operator in v1 (compatibility is preserved; the operator is not built).
+No bespoke distributed compute platform, job or task management system, or ortho tile processor. Use existing open-source frameworks and `Ortho4XP`. No Kubernetes operator in v1 (compatibility is preserved; the operator is not built).
 
 ## Engineering Principles (binding)
 

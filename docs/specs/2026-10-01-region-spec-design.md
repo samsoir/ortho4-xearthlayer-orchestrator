@@ -13,7 +13,7 @@ contradict it, this document is wrong.
 
 A region specification that an operator can author, a validator can
 reject with every fault listed at once, and a planner can atomize into
-per-tile jobs without consulting anything else.
+per-tile tasks without consulting anything else.
 
 Success:
 
@@ -227,7 +227,7 @@ same types -- not a format negotiation layer.
 | `show <file>` | Print the parsed, normalised specification. |
 
 No authoring or generation commands. Composing a tile set is the web
-interface's job, decided in the architecture document; adding a
+interface's task, decided in the architecture document; adding a
 half-measure here would create a second authoring path to maintain and
 then deprecate.
 
@@ -279,7 +279,7 @@ a property of one rule.
   path or two. One path with a known internal layout is simpler; two
   paths is more flexible. Unresolved.
 - **Revision semantics.** Whether `revision` is operator-set or
-  derived, and whether the job server keys jobs by it so that
+  derived, and whether the job server keys tasks by it so that
   re-submitting an amended specification is distinguishable from
   re-running the original. Sub-project 2 may force this.
 - **Alert destination representation.** A URI, a named channel, or
@@ -292,7 +292,7 @@ a property of one rule.
   broad selection methods belong to the web interface and get their
   own specification.
 - **Storing specifications.** The control plane owns persistence.
-- **Enforcing the failure policy.** Modelled here, enforced by the job
+- **Enforcing the failure policy.** Modelled here, enforced by the task
   server.
 - **Environmental validation.** Listed above, and owned by the control
   plane at submission time.

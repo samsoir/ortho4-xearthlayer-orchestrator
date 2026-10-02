@@ -33,7 +33,7 @@ phases of scenery package creation;
    the associated overlays. The production work should be done at the tile level
    atomically, that is to say that the work to produce a 1x1 degree tile include
    overlays is completed as a single-shot exeuction in isolation. Succcessive
-   atomic work (or jobs) is completed in order to provide tiles for a region.
+   atomic work (or tasks) is completed in order to provide tiles for a region.
 3. **Regional Scenery Package compilation** - Once all of the required tiles for
    a specific region have been completed successfully to specification, the
    tiles are compiled into the final regional scenery package for publication
@@ -73,19 +73,19 @@ Production of the regional scenery package requires two distinct components. The
 first is the plan for the work. Using the specification provided by the
 specification phase, the production phase needs to atomize the work into
 individual tasks that can be processed. The second component is the work to
-produce the tiles themselves, which should be a single job that any capable
+produce the tiles themselves, which should be a single task that any capable
 worker can pick up, process the specification for the tile provided, return the
 artifacts produced to the specified location and exit cleanly, prepare for a new
-job.
+task.
 
 At a high level, the production phase should start by splitting the
-specification into _N_ jobs, which each job representing the work to produce a
-single 1x1 tile (including the overlays optionally). The job can then be
-committed to by a separate process that understands how to complete the job
+specification into _N_ tasks, which each task representing the work to produce a
+single 1x1 tile (including the overlays optionally). The task can then be
+committed to by a separate process that understands how to complete the task
 successfully.
 
 The work itself will be completed by Ortho4XP, likely running in a container
-that lives for the lifecyle of the job itself before terminating. The runtime
+that lives for the lifecyle of the task itself before terminating. The runtime
 for the container is not decided, but the design of the system should be able to
 support simpler container runtimes such as Podman, as well as bigger more
 sophisticated kubernetes fleets. Kubernetes is not a requirement up front, but
@@ -124,7 +124,7 @@ XEarthLayer regional scenery package using the `xearthlayer-publish` tools
 provided with the project. This part of the process should happen on a single
 node that has access to the working xearthlayer scenery package library.
 
-The compilation process should only happen once all of the required jobs for a
+The compilation process should only happen once all of the required tasks for a
 regional scenery package have completed successfully and constitute the final
 stage of this process.
 

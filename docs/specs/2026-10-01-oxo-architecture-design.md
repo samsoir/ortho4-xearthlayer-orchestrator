@@ -32,10 +32,26 @@ Success:
   operator's existing packaging tools.
 - A tile that fails is retried under a declared policy, and a tile
   that exhausts its retries is reported rather than silently dropped.
-- The control plane restarting loses no job state.
+- The control plane restarting loses no task state.
 - A worker pod that dies mid-tile has its work reclaimed and reissued.
 - No worker carries persistent configuration, so configuration drift
   between workers is not representable.
+
+## Two nouns: job and task
+
+Fixed here because every sub-project uses both, and the words were
+previously used the other way round.
+
+- A **job** is a region of work to compile: one submission of one region
+  specification revision. It is what an operator asks for.
+- A **task** is one unit that converts a single 1x1 degree tile into
+  something useful. A job consists of up to 2N tasks for N tiles —
+  an ortho task per tile, and an overlay task per tile when the
+  specification asks for them.
+
+Where this document says "the job server", it means the component that
+holds jobs and dispatches their tasks; its persistence port is the task
+store.
 
 ## Platform assumption
 
@@ -68,7 +84,7 @@ the unit of execution is a pod spec, which both runtimes consume.
                                  │  job-server port
                      ┌───────────▼─────────────────────┐
                      │  Job server                     │
-                     │   jobs · leases · retries       │
+                     │   tasks · leases · retries       │
                      │   [Postgres adapter, v1]        │
                      └─────────────────────────────────┘
                                  ▲
@@ -94,11 +110,11 @@ stories are the same design with different backends. There is no
 abstraction over container runtimes beyond the pod spec itself, and no
 second execution driver.
 
-### Two job types: ortho and overlay
+### Two task types: ortho and overlay
 
 A tile's ortho production and its overlay extraction are **separate
-jobs**. The planner emits up to two jobs per tile, and a region is
-complete when every job of both types has succeeded.
+tasks**. The planner emits up to two tasks per tile, and a region is
+complete when every task of both types has succeeded.
 
 This follows from Ortho4XP rather than from preference.
 `O4_Overlay_Utils.build_overlay(lat, lon)` reads only X-Plane's
@@ -112,25 +128,25 @@ dependency in either direction.
 
 Keeping them apart buys four things:
 
-- **Resource profiles that are not comparable.** An overlay job is a
+- **Resource profiles that are not comparable.** An overlay task is a
   file copy, a DSFTool conversion and some text processing: minutes
-  and megabytes. An ortho job is imagery download plus mesh
+  and megabytes. An ortho task is imagery download plus mesh
   generation: hours, and hundreds of gigabytes on observed figures.
   Bundled, the light work would have to reserve the heavy work's
-  footprint, and admission control could not pack many overlay jobs
-  into the space one ortho job needs.
+  footprint, and admission control could not pack many overlay tasks
+  into the space one ortho task needs.
 - **Failure isolation.** Bundled, an overlay fault at the end of a
   tile would retry hours of completed ortho work.
 - **Disjoint dependencies.** Ortho needs the imagery provider and
   Overpass; overlay needs the X-Plane overlay source and DSFTool. A
-  provider outage stalls ortho jobs while overlay jobs keep draining,
+  provider outage stalls ortho tasks while overlay tasks keep draining,
   and the reverse holds. Bundled, either outage blocks everything.
 - **No egress contention**, since the output trees are separate.
 
 `include_overlays` in the region specification therefore decides
-whether the planner emits overlay jobs at all, rather than changing
-what a worker does inside a single job. A region with
-`include_overlays = false` produces N jobs, all ortho; one with it set
+whether the planner emits overlay tasks at all, rather than changing
+what a worker does inside a single task. A region with
+`include_overlays = false` produces N tasks, all ortho; one with it set
 produces 2N. Building a region without overlays is a first-class
 option, not a degraded mode.
 
@@ -146,11 +162,11 @@ choice of three.
    with no configuration of its own.
 3. The pod **self-initializes** from that configuration -- it stages
    what it needs rather than being pre-staged by the orchestrator.
-4. The pod **self-checks capacity** and claims a job only if it has
-   room to complete one. An overlay job's footprint is a small
-   fraction of an ortho job's, so the same pod may accept one and
+4. The pod **self-checks capacity** and claims a task only if it has
+   room to complete one. An overlay task's footprint is a small
+   fraction of an ortho task's, so the same pod may accept one and
    decline the other.
-5. The pod does the job's work -- ortho production, or overlay
+5. The pod does the task's work -- ortho production, or overlay
    extraction, for one tile.
 6. The pod egresses artifacts to the durable volume.
 7. The pod **cleans up as defined** -- scratch is wiped wholesale.
@@ -172,7 +188,7 @@ pod that cannot fit a tile does not claim one, so disk pressure
 throttles the system without any central scheduler. One-shot mode is
 the same protocol with a claim limit of one.
 
-### Pod lifecycle is the platform's job
+### Pod lifecycle is the platform's task
 
 OXO does not create, scale or reap pods, and holds no credentials for
 a container runtime API. Worker pods are started by the platform:
@@ -196,7 +212,7 @@ publishes a desired state for the platform to converge on.
 |---|---|---|
 | `scratch` | Ephemeral, per pod | All intermediate work. Wiped wholesale on cleanup. |
 | `artifacts` | Durable | Finished ortho tiles (`zOrtho4XP_<tile>/`) and overlays (`yOrtho4XP_Overlays/`). The egress target and the v1 deliverable: the operator points existing packaging tools at it. |
-| `dem-cache` | Persistent, shared | Elevation data, which covers more area than one 1x1 degree tile and is therefore worth retaining across jobs and pods. |
+| `dem-cache` | Persistent, shared | Elevation data, which covers more area than one 1x1 degree tile and is therefore worth retaining across tasks and pods. |
 
 Working on scratch rather than directly on the durable volume keeps
 Ortho4XP's heavy intermediate I/O local, makes cleanup trivially
@@ -217,8 +233,8 @@ the worker design.
 The headless entry point is
 `python3 Ortho4XP.py <lat> <lon> [provider_code] [zoomlevel]`, which
 runs `build_poly_file` -> `build_mesh` -> `build_masks` -> `build_tile`
-for one tile and exits. The 1x1 degree job boundary therefore mirrors
-the tool's own boundary, which is what makes a job retryable and a
+for one tile and exits. The 1x1 degree task boundary therefore mirrors
+the tool's own boundary, which is what makes a task retryable and a
 worker stateless. That is a property of the tool, not a choice.
 
 **The headless path never builds overlays.** `Ortho4XP.py` calls
@@ -226,7 +242,7 @@ worker stateless. That is a property of the tool, not a choice.
 function argument to `O4_Tile_Utils.build_tile_list`, a batch routine
 the GUI drives, so a worker shelling out to `Ortho4XP.py` cannot
 produce overlays at all and must call `O4_Overlay_Utils.build_overlay`
-itself. This is part of why ortho and overlay are separate job types.
+itself. This is part of why ortho and overlay are separate task types.
 
 **Exit status is not a failure signal.** Every `sys.exit()` in
 `Ortho4XP.py` is bare, so it exits 0. The build itself is wrapped in a
@@ -257,10 +273,10 @@ rediscover:
   to a usable failure taxonomy, and is the only way to reach overlay
   extraction at all.
 - Overlay output is grouped into 10 degree blocks by `round_latlon`,
-  so every overlay job in one block writes into a single shared
+  so every overlay task in one block writes into a single shared
   destination directory -- and Ortho4XP tests for that directory and
   then creates it (`O4_Overlay_Utils.py:208-209`), a time-of-check to
-  time-of-use race that one pod per job makes live. The worker must
+  time-of-use race that one pod per task makes live. The worker must
   create that directory idempotently rather than relying on
   Ortho4XP's check.
 
@@ -272,8 +288,8 @@ boundaries that principle produces here.
 | Component | Responsibility | Depends on |
 |---|---|---|
 | Region spec | Model and validation of a region: metadata, its explicit set of 1x1 degree tiles, and production parameters | Nothing |
-| Job server | Durable job state, lease/claim/heartbeat/expiry, retry accounting, region-completion gate | A persistence adapter |
-| Control plane | Atomize a spec into jobs, serve the claim API, own the pod spec, inject config, expose throughput | Region spec, job-server port |
+| Job server | Durable task state, lease/claim/heartbeat/expiry, retry accounting, region-completion gate | A persistence adapter |
+| Control plane | Atomize a spec into tasks, serve the claim API, own the pod spec, inject config, expose throughput | Region spec, job-server port |
 | Worker pod | Self-init, capacity check, tile production, egress, cleanup, recycle/stop | Injected config, OXO API |
 
 **The job-server role is separated from the control plane by an
@@ -296,14 +312,14 @@ tests a far better surface than a broker protocol.
 | Configuration ownership | Injected at pod start; pods carry none | Configuration drift between workers becomes unrepresentable rather than merely discouraged |
 | Region definition | The specification takes an explicit set of 1x1 degree tiles | How a human composes that set is a UX concern, specified separately with the web interface; the model must not be shaped by its authoring tool |
 | v1 deliverable | A complete ortho and overlay tile set in a target location | Packaging and publishing stay with the operator's existing tooling; even this much is a large improvement on the manual process |
-| Job types | Ortho and overlay are separate jobs | They share no data, their resource profiles differ by orders of magnitude, and their dependencies are disjoint; bundling would make light work reserve heavy work's footprint and let either dependency's outage block everything |
+| Task types | Ortho and overlay are separate tasks | They share no data, their resource profiles differ by orders of magnitude, and their dependencies are disjoint; bundling would make light work reserve heavy work's footprint and let either dependency's outage block everything |
 | Dispatch | Pull — pods claim tiles | Makes recycle mode coherent; puts capacity assessment where it can be measured |
 | Pod lifecycle management | The platform's, not OXO's | Conforms to the "no bespoke compute platform" non-goal; local and cloud differ in unit files only |
 | Scaling automation | Out of scope for v1; throughput signal kept as a contract | Additive later; building it now is unjustified |
 | Work location | Ephemeral scratch, egress to durable volume | Local intermediate I/O; wholesale cleanup; no partial state in the delivered tree |
-| DEM cache | Persistent and shared across pods | Elevation data spans more than one tile, so re-downloading per job is pure waste |
+| DEM cache | Persistent and shared across pods | Elevation data spans more than one tile, so re-downloading per task is pure waste |
 | Execution mode | Recycle or stop, per configuration | The README's container-lifetime tension is a parameter, not a design choice |
-| Job substrate | Postgres behind a job-server port: a domain `jobs` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, leases held by heartbeat rather than a fixed duration | Specs, the completion gate and throughput are all queries; one store beats a store plus a broker. Settled in the job server design after a survey found no mature Rust Postgres queue crate, and none able to answer the domain questions this system asks |
+| Job substrate | Postgres behind a job-server port: a domain `tasks` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`, leases held by heartbeat rather than a fixed duration | Specs, the completion gate and throughput are all queries; one store beats a store plus a broker. Settled in the job server design after a survey found no mature Rust Postgres queue crate, and none able to answer the domain questions this system asks |
 | Failure detection | Artifacts and output markers | Ortho4XP's headless path exits 0 on every failure |
 | Spec convention | `docs/specs/YYYY-MM-DD-<topic>-design.md`, plans in `docs/plans/` | Matches the author's established convention across sibling projects |
 | End user documentation | Lives in `docs/`, completed once the function is completed to provide end users guidance on functionality. | End user docs must be written only when the api and ux are stable. |
@@ -318,8 +334,8 @@ implementation cycle.
 |---|---|---|
 | 0 | *(spike)* Ortho4XP pod contract | One tile built headless in a container. Measured peak scratch, memory and wall-clock. Exit and failure taxonomy. What configuration must be injected. What the DEM cache actually saves. Output is numbers and an answer; anything built is throwaway. |
 | 1 | Region spec: model and validation | Specification data model over an explicit set of 1x1 degree tiles, plus metadata, production parameters and validation rules, with a CLI. Pure library: no persistence, no runtime, no network. |
-| 2 | Job server: port and Postgres adapter | Job lifecycle state machine, lease/heartbeat/expiry, retry policy and accounting, region-completion gate across both job types, Postgres adapter behind the port. |
-| 3 | Control plane: planner and claim API | Atomize a specification into per-tile ortho and overlay jobs — up to 2N jobs from N tiles, overlay jobs only when the specification asks for them — serve claim/heartbeat/complete/fail, inject configuration, own the pod spec, expose the throughput signal. |
+| 2 | Job server: port and Postgres adapter | Task lifecycle state machine, lease/heartbeat/expiry, retry policy and accounting, region-completion gate across both task types, Postgres adapter behind the port. |
+| 3 | Control plane: planner and claim API | Atomize a specification into per-tile ortho and overlay tasks — up to 2N tasks from N tiles, overlay tasks only when the specification asks for them — serve claim/heartbeat/complete/fail, inject configuration, own the pod spec, expose the throughput signal. |
 | 4 | Ortho4XP worker pod | Image, self-initialization, capacity check, ortho production and overlay extraction, artifact egress, cleanup, recycle and stop modes. Must create the shared overlay destination directory idempotently. |
 | 5 | Observability and operator interface | Telemetry export, failure policy and alerting, operator views in HTML5/CSS/JS to WCAG principles. |
 
@@ -343,11 +359,11 @@ interface.
   provider and whether overlays are included. Spike 0 supplies the
   numbers. **Amended:** this was assigned to sub-project 2, which cannot
   carry it — the numbers do not exist until spike 0 runs, and the
-  consumer is the worker's capacity self-check rather than the job store.
-  Until then a worker expresses capacity by filtering the job types it
-  will claim, which is sufficient because an overlay job's footprint is a
-  small fraction of an ortho job's. When the numbers exist the estimate
-  becomes a column on the job record and a predicate in the claim query,
+  consumer is the worker's capacity self-check rather than the task store.
+  Until then a worker expresses capacity by filtering the task types it
+  will claim, which is sufficient because an overlay task's footprint is a
+  small fraction of an ortho task's. When the numbers exist the estimate
+  becomes a column on the task record and a predicate in the claim query,
   which is additive.
 - **DEM cache concurrency and accounting.** Safe shared access for
   concurrent pods, and a bound on its growth.
@@ -382,7 +398,7 @@ interface.
 - Scaling automation and any OXO-held container runtime credentials.
 - A Kubernetes operator. Compatibility is preserved; the operator is
   not built.
-- Any bespoke distributed compute platform, job management system or
+- Any bespoke distributed compute platform, job or task management system, or
   ortho tile processor, per the README's non-goals.
 
 ## Rejected alternatives
@@ -395,7 +411,7 @@ asked for at the cost of the only abstraction that matters being
 duplicated.
 
 **Push dispatch, one pod per tile.** The control plane would create a
-pod per job with the tile baked into its configuration -- simplest
+pod per task with the tile baked into its configuration -- simplest
 possible pod, no claim protocol. Rejected: recycle mode loses its
 meaning, every tile pays cold start and cache rebuild, and it forces
 OXO to hold runtime credentials and make placement decisions.
@@ -408,12 +424,12 @@ self-assessment in a pulling pod achieves the same throttling.
 
 **NATS JetStream as the substrate.** Ack-timeout leases and
 max-deliver retry limits natively, in one light clusterable binary.
-Rejected for v1: a queue is not a database, so job state and the
+Rejected for v1: a queue is not a database, so task state and the
 completion gate need a store alongside it -- two systems where one
 suffices. Retained as a plausible future adapter behind the
 job-server port, which is why that port exists.
 
-**Temporal.** The strongest conformance to "no bespoke job system",
+**Temporal.** The strongest conformance to "no bespoke task system",
 with durability, retries and heartbeats as the product. Rejected:
 substantial operational weight, and a poor fit for pull-based Python
 worker pods, which are not Temporal workers and would need a shim.
@@ -426,22 +442,22 @@ leave partial state where the operator's tooling reads.
 
 **Scratch and egress with no persistent cache.** Cleaner accounting
 and a genuinely stateless pod. Rejected: elevation data covers more
-than one tile, so this re-downloads it for every job in a region.
+than one tile, so this re-downloads it for every task in a region.
 
 ## Dependencies
 
 - **Ortho4XP** -- tile production. Headless per-tile entry point;
   reads a configuration surface of 16 application-level and 44
   tile-level variables (`src/O4_Cfg_Vars.py`, counted 2026-10-01), of
-  which the tile-level set is what a per-job configuration must
+  which the tile-level set is what a per-task configuration must
   supply; needs its overlay source as a real directory.
 - **A reachable Overpass endpoint** for vector data, named by the
   injected configuration. Public servers rate-limit and truncate
   under load, which is a recorded cause of build failure; the
   configuration must be able to name several.
-- **DSFTool and an X-Plane overlay source tree**, for overlay jobs
+- **DSFTool and an X-Plane overlay source tree**, for overlay tasks
   only. `build_overlay` copies the shipped `.dsf` for the tile and
-  converts it DSF -> text -> DSF, so an overlay job needs neither the
+  converts it DSF -> text -> DSF, so an overlay task needs neither the
   imagery provider nor Overpass.
 - **`xearthlayer-publish`** -- not invoked by OXO, and not a runtime
   dependency. It is the operator's tool for the packaging step that
