@@ -3581,7 +3581,7 @@ impl Fixture for Postgres {
         let schema = format!("conf_{}", Uuid::new_v4().simple());
 
         // One connection, not the shared pool's eight: this only issues a
-        // CREATE SCHEMA, and eighteen cases running concurrently would
+        // CREATE SCHEMA, and nineteen cases running concurrently would
         // otherwise open well over a hundred connections between them and
         // exhaust the server's default limit. The pool is dropped at the end
         // of this function, so the connection does not outlive the setup.
@@ -3679,38 +3679,76 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
 
         let mut tx = self.pool.begin().await.map_err(adapter)?;
 
-        // Lock the identity so two concurrent creations cannot both insert.
-        let existing: Option<(Uuid, i64, i64)> = sqlx::query_as(
-            "SELECT id, max_attempts, backoff_secs FROM jobs \
-             WHERE region_code = $1 AND revision = $2 FOR UPDATE",
+        // Insert first, then fall back to resuming. The obvious order --
+        // look for the identity, then insert if absent -- does not work
+        // here: `SELECT ... FOR UPDATE` locks rows that EXIST, so a
+        // brand-new identity has no row to lock, two concurrent creators
+        // both find nothing, and both insert. One then receives a bare
+        // unique violation where the in-memory adapter, serialised by its
+        // mutex, resumes. That is not hypothetical for OXO, where dispatch
+        // is pull and several pods can call create_job for the same region
+        // as they start.
+        //
+        // Inserting first makes the unique index itself the arbiter. The
+        // loser's statement waits for the winner's transaction to finish;
+        // if it committed, DO NOTHING applies and we fall through to the
+        // resume path, where the winner's tasks are already visible because
+        // they were committed in the same transaction. If it aborted, no
+        // conflict remains and this insert simply succeeds. The fall-through
+        // relies on READ COMMITTED, PostgreSQL's default, where each
+        // statement sees the latest committed data.
+        let job_uuid = Uuid::new_v4();
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (region_code, revision) DO NOTHING \
+             RETURNING id",
         )
+        .bind(job_uuid)
         .bind(&request.region_code)
         .bind(revision)
+        .bind(max_attempts)
+        .bind(backoff_secs)
+        .bind(now)
         .fetch_optional(&mut *tx)
         .await
         .map_err(adapter)?;
 
-        if let Some((job_uuid, existing_attempts, existing_backoff)) = existing {
-            let job_id = JobId::from_uuid(job_uuid);
+        if inserted.is_none() {
+            // DO NOTHING fired, so a committed row holds this identity --
+            // an aborted one would have left no conflict and let the insert
+            // through. Reading it back cannot come up empty.
+            let (existing_uuid, existing_attempts, existing_backoff): (Uuid, i64, i64) =
+                sqlx::query_as(
+                    "SELECT id, max_attempts, backoff_secs FROM jobs \
+                     WHERE region_code = $1 AND revision = $2",
+                )
+                .bind(&request.region_code)
+                .bind(revision)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(adapter)?;
+
             let rows: Vec<(String, String)> =
                 sqlx::query_as("SELECT tile, task_type FROM tasks WHERE job_id = $1")
-                    .bind(job_uuid)
+                    .bind(existing_uuid)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(adapter)?;
 
             let mut existing_set: Vec<(String, String)> = rows;
             existing_set.sort();
+            // No dedup: the duplicate guard at the top of this function has
+            // already proved the request carries no repeated pair, and the
+            // table's UNIQUE constraint says the same of the stored side.
             let mut requested: Vec<(String, String)> = request
                 .tasks
                 .iter()
                 .map(|spec| (spec.tile.to_string(), spec.task_type.as_str().to_string()))
                 .collect();
             requested.sort();
-            requested.dedup();
 
-            let same_policy =
-                existing_attempts == max_attempts && existing_backoff == backoff_secs;
+            let same_policy = existing_attempts == max_attempts && existing_backoff == backoff_secs;
             if existing_set != requested || !same_policy {
                 return Err(TaskStoreError::JobConflict {
                     region_code: request.region_code,
@@ -3721,32 +3759,22 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
             tx.commit().await.map_err(adapter)?;
             let total_tasks = u32::try_from(existing_set.len()).unwrap_or(u32::MAX);
             return Ok(JobCreated {
-                job_id,
+                job_id: JobId::from_uuid(existing_uuid),
                 created: false,
                 total_tasks,
             });
         }
 
-        let job_uuid = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(job_uuid)
-        .bind(&request.region_code)
-        .bind(revision)
-        .bind(max_attempts)
-        .bind(backoff_secs)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(adapter)?;
-
         for spec in &request.tasks {
             sqlx::query(
+                // No ON CONFLICT clause. The duplicate guard makes a
+                // collision within one request impossible, and job_uuid is
+                // freshly minted so it cannot collide across jobs. A
+                // conflict here would mean an assumption has broken, and
+                // should fail loudly rather than quietly create fewer tasks
+                // than were asked for.
                 "INSERT INTO tasks (id, job_id, tile, task_type, state, attempts, claimable_at) \
-                 VALUES ($1, $2, $3, $4, 'pending', 0, $5) \
-                 ON CONFLICT (job_id, tile, task_type) DO NOTHING",
+                 VALUES ($1, $2, $3, $4, 'pending', 0, $5)",
             )
             .bind(Uuid::new_v4())
             .bind(job_uuid)
@@ -3835,6 +3863,73 @@ Replace the stub:
 Add the imports this needs: `oxo_tasks::ids::{TaskId, LeaseToken}`, `oxo_tasks::task::TaskType`, `uuid::Uuid`.
 
 Note the two `Adapter` errors on conversion. They should be unreachable — the `CHECK` constraint and the specification's validation both prevent them — but a store that silently mangled a tile identifier would be far worse than one that says it found something it could not read.
+
+- [ ] **Step 4b: Pin the concurrent-creation invariant in the conformance suite**
+
+The insert-first ordering above is not covered by any existing case: the
+suite's one concurrency case exercises `claim`, and
+`creating_a_job_twice_resumes_it` is sequential. Without a case, the
+divergence this fixes can return silently.
+
+Add to `oxo-tasks/src/conformance.rs`, before the
+`a_failure_is_requeued_until_the_budget_is_spent` case:
+
+```rust
+/// Several creators of one brand-new job must agree on the outcome.
+///
+/// Not hypothetical for OXO: dispatch is pull, so several pods can call
+/// `create_job` for the same region and revision as they start. Exactly one
+/// must create it and the rest must resume it, all naming the same job and
+/// the same task count. A store that looks for the identity and only then
+/// inserts cannot promise this -- `SELECT ... FOR UPDATE` locks rows that
+/// exist, and a brand-new identity has none -- so every caller finds
+/// nothing, all of them insert, and the losers get a constraint violation
+/// where the contract says they should resume.
+pub async fn concurrent_creation_of_one_job_happens_once(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let store: Arc<dyn TaskStore> = Arc::from(subject.store);
+
+    let mut creators = Vec::new();
+    for _ in 0..4 {
+        let store = Arc::clone(&store);
+        creators.push(tokio::spawn(
+            async move { store.create_job(two_task_job()).await },
+        ));
+    }
+
+    let mut outcomes = Vec::new();
+    for creator in creators {
+        outcomes.push(
+            creator
+                .await
+                .expect("creator did not panic")
+                .expect("create_job either creates the job or resumes it, never fails"),
+        );
+    }
+
+    let created = outcomes.iter().filter(|outcome| outcome.created).count();
+    assert_eq!(created, 1, "exactly one caller created the job");
+
+    let job_id = outcomes[0].job_id;
+    for outcome in &outcomes {
+        assert_eq!(outcome.job_id, job_id, "every caller names the same job");
+        assert_eq!(
+            outcome.total_tasks, 2,
+            "every caller sees the whole task set, including the ones that resumed"
+        );
+    }
+}
+```
+
+and register it in `conformance_suite!`, immediately after
+`a_job_with_a_duplicated_task_is_refused`:
+
+```rust
+        $crate::conformance_case!($fixture, concurrent_creation_of_one_job_happens_once);
+```
+
+The suite is now 19 cases. The parity test added in Task 8 will fail if the
+definition and the registration do not both land.
 
 - [ ] **Step 5: Run the suite**
 
@@ -4176,10 +4271,10 @@ Then the two methods:
 - [ ] **Step 3: Run the whole suite against both adapters**
 
 Run: `make verify`
-Expected: PASS, including the 15 in-memory conformance tests.
+Expected: PASS, including the 19 in-memory conformance tests.
 
 Run: `make verify-db`
-Expected: PASS, all 15 conformance cases plus the migration test — 16 tests against a real PostgreSQL.
+Expected: PASS, all 19 conformance cases plus the migration test — 20 tests against a real PostgreSQL.
 
 - [ ] **Step 4: Confirm no stubs survive**
 
