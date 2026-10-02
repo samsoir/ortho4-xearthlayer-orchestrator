@@ -172,13 +172,13 @@ mod tests {
         assert_eq!(id.to_string(), id.as_uuid().to_string());
     }
 
-    #[test]
-    fn identities_of_different_kinds_are_different_types() {
-        // A compile-time property, asserted by construction: this function
-        // would not compile if TaskId and JobId were the same type.
-        fn takes_task(_: TaskId) {}
-        takes_task(TaskId::generate());
-    }
+    // There is deliberately no test asserting that the three identities
+    // are distinct *types*. That is a compile-time property: the macro
+    // emits three separate nominal structs, so passing a TaskId where a
+    // JobId belongs does not compile, and `cargo build` already enforces
+    // it. A `#[test]` wrapping a call that merely compiles asserts
+    // nothing at runtime and can never fail — the same shape as three
+    // tests removed from Task 2 during this plan's pre-flight scan.
 }
 ```
 
@@ -304,6 +304,9 @@ macro_rules! identity {
     };
 }
 
+// Three separate invocations, so these are three distinct nominal
+// types: passing a TaskId where a JobId belongs will not compile.
+// Enforced by the type system, not by a test.
 identity!(JobId, "Identifies one job: one submission of one specification revision.");
 identity!(TaskId, "Identifies one task: one tile, one task type, within one job.");
 identity!(
