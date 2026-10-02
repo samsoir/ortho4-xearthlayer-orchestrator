@@ -350,6 +350,26 @@ mod tests {
         }
     }
 
+    /// A job with exactly one task, for tests about a single task's whole
+    /// lifecycle.
+    ///
+    /// `two_tile_job` has two, and claim order is FIFO by `claimable_at` — so
+    /// once a task has failed and been requeued to `now + backoff`, it sorts
+    /// *after* a sibling that has never been claimed. A loop that claims "the
+    /// next task" then gets the sibling, not the task under test.
+    pub(crate) fn one_task_job() -> CreateJob {
+        CreateJob {
+            region_code: "NA".to_string(),
+            revision: 1,
+            max_attempts: 3,
+            backoff: Duration::from_secs(60),
+            tasks: vec![TaskSpec {
+                tile: tile(50, -2),
+                task_type: TaskType::Ortho,
+            }],
+        }
+    }
+
     #[tokio::test]
     async fn creating_a_job_reports_what_it_created() {
         let store = store(clock());
@@ -726,7 +746,10 @@ mod tests {
     async fn a_task_is_abandoned_on_the_last_permitted_start() {
         let test_clock = clock();
         let store = store(test_clock.clone());
-        store.create_job(two_tile_job()).await.unwrap();
+        // One task, not two: this test follows a single task through its whole
+        // attempt budget, and with two tasks the FIFO order would hand out the
+        // never-claimed sibling on the second claim.
+        store.create_job(one_task_job()).await.unwrap();
 
         // max_attempts is 3, so the third failure abandons.
         for expected_remaining in [2u32, 1] {
