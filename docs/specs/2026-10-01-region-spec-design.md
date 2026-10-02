@@ -154,7 +154,14 @@ A pure function of the model. No filesystem, no network, no clock.
   neither the reserved-key check nor a control-character check -- a space
   is Unicode `Zs`, not `Cc`. A value with edge whitespace cannot
   round-trip either, since the strip removes the trailing portion, so the
-  value Ortho4XP reads is not the value the specification states.
+  value Ortho4XP reads is not the value the specification states. A value
+  also may not carry a **control character at either edge**: Rust's
+  `trim` covers Unicode `White_Space`, Python's `strip` additionally
+  removes the C0 separators U+001C-U+001F, and the rule rejects both at a
+  value edge. That boundary is exact, and checked exhaustively -- Python
+  strips 29 codepoints in all of Unicode, and every one of them is
+  rejected here, so no value this crate accepts is one Ortho4XP would
+  silently truncate.
 - Failure policy is coherent: at least one attempt, non-negative
   backoff.
 - The target location is a well-formed path.

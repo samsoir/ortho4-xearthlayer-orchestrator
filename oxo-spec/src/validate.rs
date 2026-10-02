@@ -306,9 +306,23 @@ fn raw_key_fault(key: &str) -> Option<&'static str> {
 
 /// Why Ortho4XP could not be handed this raw value, or `None` if it can.
 ///
+/// The two edge rules together cover exactly what Python's `str.strip()`
+/// removes, which is what decides whether a value survives Ortho4XP's read.
+/// Rust's `str::trim` removes Unicode `White_Space`; Python additionally
+/// strips the C0 separators U+001C-U+001F, which are `Cc` rather than
+/// `White_Space`, so the control-character arm closes those four. Checked
+/// exhaustively over all of Unicode: `str::strip` removes 29 codepoints and
+/// every one of them is `char::is_whitespace() || char::is_control()`, so
+/// nothing Python strips is accepted here.
+///
+/// The diagnostics stay specific rather than collapsing into one: an edge
+/// character that is whitespace reports as edge whitespace even when it is
+/// also `Cc` (tab, `\v`, `\f`), and an edge C0 separator reports as an edge
+/// control character.
+///
 /// An empty value is legal — `"foo="` still splits into exactly two items —
-/// and an interior control character or space survives the read untouched, so
-/// neither is rejected. Only the line's edges are at risk.
+/// and an interior control character or space is untouched by the strip and so
+/// survives the read intact, which is why only the line's edges are rejected.
 fn raw_value_fault(value: &str) -> Option<&'static str> {
     if value.contains('\n') || value.contains('\r') {
         Some(LINE_BREAK_REASON)
@@ -316,6 +330,10 @@ fn raw_value_fault(value: &str) -> Option<&'static str> {
         Some(EQUALS_REASON)
     } else if value.trim() != value {
         Some(VALUE_EDGE_WHITESPACE_REASON)
+    } else if value.chars().next().is_some_and(char::is_control)
+        || value.chars().next_back().is_some_and(char::is_control)
+    {
+        Some(VALUE_EDGE_CONTROL_REASON)
     } else {
         None
     }
@@ -343,6 +361,17 @@ const VALUE_EDGE_WHITESPACE_REASON: &str =
     "Ortho4XP strips each configuration line, so a value with leading or \
      trailing whitespace is not the value it reads; stating one value and \
      delivering another is worse than rejecting it";
+
+/// A value with a control character at either edge does not survive the strip
+/// either: Python's `str.strip()` removes the C0 separators U+001C-U+001F,
+/// which Rust's `trim` leaves in place because they are not `White_Space`.
+/// Without this the whitespace rule's own message would be false — it tells
+/// the operator the value would not survive Ortho4XP's read, and this one does
+/// not survive it either.
+const VALUE_EDGE_CONTROL_REASON: &str =
+    "Ortho4XP strips each configuration line, and Python's strip also removes \
+     the C0 separators, so a value with a control character at either edge is \
+     not the value it reads";
 
 /// Shared: a second `=` anywhere on the line fails the same way.
 const EQUALS_REASON: &str =
@@ -924,6 +953,109 @@ mod tests {
                 }],
                 "expected {value:?} to be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn a_raw_value_with_an_edge_c0_separator_is_a_fault() {
+        // Python's `strip()` removes U+001C-U+001F, but they are `Cc` rather
+        // than Unicode `White_Space`, so `trim()` leaves them and the
+        // whitespace arm alone would accept a value Ortho4XP then truncates —
+        // making that arm's own message false.
+        for value in ["18\u{1c}", "\u{1f}18", "18\u{1d}", "18\u{1e}"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert("custom_dem".to_string(), value.to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::MalformedRawValue {
+                    key: "custom_dem".to_string(),
+                    reason: VALUE_EDGE_CONTROL_REASON,
+                }],
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edge_character_that_is_both_whitespace_and_control_reports_as_whitespace() {
+        // Ordering check: tab, \v and \f are both `White_Space` and `Cc`, and
+        // the more specific diagnosis is that the strip removes them as
+        // whitespace. They must not be reclassified as control characters.
+        for value in ["18\t", "\u{b}18", "18\u{c}"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.raw.insert("custom_dem".to_string(), value.to_string());
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::MalformedRawValue {
+                    key: "custom_dem".to_string(),
+                    reason: VALUE_EDGE_WHITESPACE_REASON,
+                }],
+                "expected {value:?} to report as edge whitespace"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interior_control_character_is_not_reclassified_as_an_edge_fault() {
+        // In a value it survives the strip intact, so it stays legal.
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw
+            .insert("custom_dem".to_string(), "a\u{1c}b".to_string());
+        validate_parameters(&p, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // In a key it is still reported as an interior control character, not
+        // as edge whitespace.
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert("foo\u{7}bar".to_string(), "18".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::MalformedRawKey {
+                key: "foo\u{7}bar".to_string(),
+                reason: "a key cannot contain control characters",
+            }]
+        );
+    }
+
+    /// Every codepoint Python's `str.strip()` removes, enumerated
+    /// exhaustively over all of Unicode. There are 29, and the boundary claim
+    /// in `raw_value_fault`'s doc comment is that this rule rejects all of
+    /// them at a value edge — otherwise its message would promise the value
+    /// survives Ortho4XP's read when it does not.
+    const PYTHON_STRIPS: [char; 29] = [
+        '\u{9}', '\u{a}', '\u{b}', '\u{c}', '\u{d}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}',
+        '\u{20}', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}',
+        '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}',
+        '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+    ];
+
+    #[test]
+    fn nothing_python_strips_is_accepted_at_a_raw_value_edge() {
+        for c in PYTHON_STRIPS {
+            for value in [format!("18{c}"), format!("{c}18")] {
+                let mut errors = Vec::new();
+                let mut p = parameters();
+                p.raw.insert("custom_dem".to_string(), value.clone());
+                validate_parameters(&p, &mut errors);
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "U+{:04X} at an edge of {value:?} was not rejected: {errors:?}",
+                    c as u32
+                );
+                assert!(
+                    matches!(errors[0], ValidationError::MalformedRawValue { .. }),
+                    "U+{:04X}: {errors:?}",
+                    c as u32
+                );
+            }
         }
     }
 
