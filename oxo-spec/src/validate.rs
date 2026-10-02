@@ -606,4 +606,90 @@ mod tests {
         );
         assert_eq!(errors, vec![ValidationError::MaxAttemptsTooLow]);
     }
+
+    #[test]
+    fn an_empty_region_code_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.region_code = String::new();
+        validate_metadata(&m, &mut errors);
+        assert_eq!(errors, vec![ValidationError::EmptyRegionCode]);
+    }
+
+    #[test]
+    fn the_region_code_length_ceiling_is_sixteen() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.region_code = "A".repeat(16);
+        validate_metadata(&m, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "16 characters must be accepted: {errors:?}"
+        );
+
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.region_code = "A".repeat(17);
+        validate_metadata(&m, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidRegionCode {
+                value: "A".repeat(17)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_provider_code_with_a_backslash_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.provider = "Global\\BI".to_string();
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidProviderCode {
+                value: "Global\\BI".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_provider_code_length_ceiling_is_sixty_four() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.provider = "B".repeat(64);
+        validate_parameters(&p, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "64 characters must be accepted: {errors:?}"
+        );
+
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.provider = "B".repeat(65);
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidProviderCode {
+                value: "B".repeat(65)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_provider_code_with_whitespace_or_control_characters_is_a_fault() {
+        for code in ["BI GO2", "BI\tGO2", "BI\u{7}"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.provider = code.to_string();
+            validate_parameters(&p, &mut errors);
+            assert_eq!(
+                errors,
+                vec![ValidationError::InvalidProviderCode {
+                    value: code.to_string()
+                }],
+                "expected {code:?} to be rejected"
+            );
+        }
+    }
 }
