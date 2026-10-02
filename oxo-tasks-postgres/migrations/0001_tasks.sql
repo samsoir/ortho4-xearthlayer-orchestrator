@@ -12,10 +12,10 @@ CREATE TABLE jobs (
     -- negative i32 and inserts silently, corrupting the identity that the
     -- UNIQUE below is meant to protect. The other numeric columns are already
     -- covered by their own lower bounds.
-    revision     integer     NOT NULL CHECK (revision >= 1),
+    revision     bigint      NOT NULL CHECK (revision >= 0),
     -- Snapshotted from the specification's failure policy, so editing a
     -- specification cannot change the policy of a job already in flight.
-    max_attempts integer     NOT NULL CHECK (max_attempts >= 1),
+    max_attempts bigint      NOT NULL CHECK (max_attempts >= 0),
     backoff_secs bigint      NOT NULL CHECK (backoff_secs >= 0),
     created_at   timestamptz NOT NULL,
     UNIQUE (region_code, revision)
@@ -28,7 +28,7 @@ CREATE TABLE tasks (
     task_type          text        NOT NULL CHECK (task_type IN ('ortho', 'overlay')),
     state             text        NOT NULL CHECK (state IN ('pending', 'claimed', 'succeeded', 'abandoned')),
     -- Counts starts, not failures: incremented at claim.
-    attempts          integer     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    attempts          bigint      NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     claimable_at      timestamptz NOT NULL,
     lease_token       uuid,
     claimed_by        text,
