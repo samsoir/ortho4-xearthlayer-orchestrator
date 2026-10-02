@@ -13,6 +13,7 @@ pub mod clock;
 pub mod error;
 pub mod ids;
 pub mod request;
+pub mod store;
 pub mod task;
 
 pub use clock::{Clock, SystemClock, TestClock};
@@ -22,4 +23,5 @@ pub use request::{
     ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
     ReapOutcome, ReapRequest, TaskSpec, Throughput,
 };
+pub use store::TaskStore;
 pub use task::{TaskState, TaskType};
