@@ -86,6 +86,31 @@ fn task_key(spec: &TaskSpec) -> (TileId, TaskType) {
     (spec.tile, spec.task_type)
 }
 
+impl State {
+    /// Resolve a lease to a claimed task, rejecting the three ways it can be
+    /// invalid. Shared by heartbeat, complete and fail so the checks cannot
+    /// drift apart between them.
+    fn claimed_mut(&mut self, lease: Lease) -> Result<&mut Task, TaskStoreError> {
+        let task = self
+            .tasks
+            .get_mut(&lease.task_id)
+            .ok_or(TaskStoreError::UnknownTask {
+                task_id: lease.task_id,
+            })?;
+        if task.state != TaskState::Claimed {
+            return Err(TaskStoreError::NotClaimed {
+                task_id: lease.task_id,
+            });
+        }
+        if task.lease != Some(lease.token) {
+            return Err(TaskStoreError::LeaseLost {
+                task_id: lease.task_id,
+            });
+        }
+        Ok(task)
+    }
+}
+
 #[async_trait]
 impl TaskStore for InMemoryTaskStore {
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
@@ -214,16 +239,65 @@ impl TaskStore for InMemoryTaskStore {
         }))
     }
 
-    async fn heartbeat(&self, _lease: Lease) -> Result<(), TaskStoreError> {
-        unimplemented!("Task 6")
+    async fn heartbeat(&self, lease: Lease) -> Result<(), TaskStoreError> {
+        let now = self.clock.now();
+        let mut state = self.locked();
+        let task = state.claimed_mut(lease)?;
+        task.last_heartbeat_at = Some(now);
+        Ok(())
     }
 
-    async fn complete(&self, _lease: Lease) -> Result<(), TaskStoreError> {
-        unimplemented!("Task 6")
+    async fn complete(&self, lease: Lease) -> Result<(), TaskStoreError> {
+        let mut state = self.locked();
+        let task = state.claimed_mut(lease)?;
+        task.state = TaskState::Succeeded;
+        task.lease = None;
+        task.claimed_by = None;
+        task.claimed_at = None;
+        task.last_heartbeat_at = None;
+        Ok(())
     }
 
-    async fn fail(&self, _request: FailRequest) -> Result<FailOutcome, TaskStoreError> {
-        unimplemented!("Task 6")
+    async fn fail(&self, request: FailRequest) -> Result<FailOutcome, TaskStoreError> {
+        let now = self.clock.now();
+        let mut state = self.locked();
+
+        // The job's policy is needed before the task is mutably borrowed.
+        let job_id = state
+            .tasks
+            .get(&request.lease.task_id)
+            .ok_or(TaskStoreError::UnknownTask {
+                task_id: request.lease.task_id,
+            })?
+            .job_id;
+        let job = state
+            .jobs
+            .get(&job_id)
+            .ok_or(TaskStoreError::UnknownJob { job_id })?;
+        let max_attempts = job.max_attempts;
+        let backoff = job.backoff;
+
+        let task = state.claimed_mut(request.lease)?;
+        task.lease = None;
+        task.claimed_by = None;
+        task.claimed_at = None;
+        task.last_heartbeat_at = None;
+        task.last_failure = Some(request.reason);
+
+        if task.attempts >= max_attempts {
+            task.state = TaskState::Abandoned;
+            return Ok(FailOutcome::Abandoned);
+        }
+
+        let step = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero());
+        let claimable_at = now + step;
+        task.state = TaskState::Pending;
+        task.claimable_at = claimable_at;
+
+        Ok(FailOutcome::Requeued {
+            claimable_at,
+            attempts_remaining: max_attempts - task.attempts,
+        })
     }
 
     async fn reap_expired(&self, _request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
@@ -534,6 +608,174 @@ mod tests {
         assert_ne!(
             next.task_id, first.task_id,
             "the task still at its original claimable_at must come first"
+        );
+    }
+
+    async fn claim_one(store: &InMemoryTaskStore) -> ClaimedTask {
+        store
+            .claim(any("pod-1"))
+            .await
+            .expect("claim")
+            .expect("a task was available")
+    }
+
+    fn lease_of(task: &ClaimedTask) -> Lease {
+        Lease {
+            task_id: task.task_id,
+            token: task.lease,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_on_a_held_lease_succeeds() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+        store.heartbeat(lease_of(&task)).await.expect("still held");
+    }
+
+    #[tokio::test]
+    async fn completing_a_held_task_succeeds_once_and_not_twice() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+
+        store.complete(lease_of(&task)).await.expect("complete");
+
+        let again = store
+            .complete(lease_of(&task))
+            .await
+            .expect_err("already done");
+        assert!(
+            matches!(again, TaskStoreError::NotClaimed { .. }),
+            "expected NotClaimed, got {again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_lease_is_rejected_by_all_three_reporting_calls() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+        let stale = Lease {
+            task_id: task.task_id,
+            token: LeaseToken::generate(),
+        };
+
+        for error in [
+            store.heartbeat(stale).await.expect_err("heartbeat"),
+            store.complete(stale).await.expect_err("complete"),
+            store
+                .fail(FailRequest {
+                    lease: stale,
+                    reason: "Crash!".to_string(),
+                })
+                .await
+                .expect_err("fail"),
+        ] {
+            assert!(
+                matches!(error, TaskStoreError::LeaseLost { .. }),
+                "expected LeaseLost, got {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reporting_on_an_unknown_task_says_so() {
+        let store = store(clock());
+        let nowhere = Lease {
+            task_id: TaskId::generate(),
+            token: LeaseToken::generate(),
+        };
+        let error = store.heartbeat(nowhere).await.expect_err("unknown");
+        assert!(
+            matches!(error, TaskStoreError::UnknownTask { .. }),
+            "expected UnknownTask, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_with_attempts_remaining_is_requeued_with_backoff() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.unwrap();
+        let task = claim_one(&store).await;
+        let at_failure = test_clock.now();
+
+        let outcome = store
+            .fail(FailRequest {
+                lease: lease_of(&task),
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect("fail");
+
+        match outcome {
+            FailOutcome::Requeued {
+                claimable_at,
+                attempts_remaining,
+            } => {
+                assert_eq!(claimable_at, at_failure + chrono::Duration::seconds(60));
+                assert_eq!(attempts_remaining, 2, "one of three starts is spent");
+            }
+            FailOutcome::Abandoned => panic!("two attempts remained"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_is_abandoned_on_the_last_permitted_start() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.unwrap();
+
+        // max_attempts is 3, so the third failure abandons.
+        for expected_remaining in [2u32, 1] {
+            let task = claim_one(&store).await;
+            let outcome = store
+                .fail(FailRequest {
+                    lease: lease_of(&task),
+                    reason: "Crash!".to_string(),
+                })
+                .await
+                .expect("fail");
+            assert!(
+                matches!(
+                    outcome,
+                    FailOutcome::Requeued { attempts_remaining, .. }
+                        if attempts_remaining == expected_remaining
+                ),
+                "expected {expected_remaining} remaining, got {outcome:?}"
+            );
+            test_clock.advance(Duration::from_secs(60));
+        }
+
+        let last = claim_one(&store).await;
+        assert_eq!(last.attempt, 3, "the third and final start");
+        let outcome = store
+            .fail(FailRequest {
+                lease: lease_of(&last),
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect("fail");
+        assert_eq!(outcome, FailOutcome::Abandoned);
+    }
+
+    #[tokio::test]
+    async fn an_empty_task_type_filter_matches_nothing() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.unwrap();
+        let claimed = store
+            .claim(ClaimRequest {
+                worker: "pod-1".to_string(),
+                task_types: Some(Vec::new()),
+            })
+            .await
+            .expect("claim");
+        assert!(
+            claimed.is_none(),
+            "an empty filter is an empty capacity set, so it must match nothing — \
+             not fall through to matching anything"
         );
     }
 }

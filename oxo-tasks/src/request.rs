@@ -45,10 +45,11 @@ pub struct ClaimRequest {
     pub worker: String,
     /// Restrict to these task types. `None` means any.
     ///
-    /// This is how a worker expresses capacity until there is a footprint
-    /// model: one short on disk claims overlay work only, an overlay task
-    /// being a file copy and a conversion where an ortho task is hundreds of
-    /// gigabytes.
+    /// `Some(vec![])` matches nothing — an empty capacity set means no
+    /// capacity — as distinct from `None`, which matches anything. This is
+    /// how a worker expresses capacity until there is a footprint model: one
+    /// short on disk claims overlay work only, an overlay task being a file
+    /// copy and a conversion where an ortho task is hundreds of gigabytes.
     pub task_types: Option<Vec<TaskType>>,
 }
 
