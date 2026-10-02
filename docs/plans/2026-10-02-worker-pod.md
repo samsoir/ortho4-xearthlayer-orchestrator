@@ -20,7 +20,7 @@ Every task's requirements implicitly include this section.
 - **No wall-clock in tests.** Poll and heartbeat intervals are injected `Duration`s (tiny in tests); anything time-driven on the store side uses `TestClock`; container tasks (1–2, 11's smoke) are the sanctioned exception since they measure reality.
 - **The worker protocol rule** (from the control plane design): any `409` on a task report means the worker has lost the task and stops; `lease_lost` vs `not_claimed` is informational only; `503` is the only retryable status; `204` on claim means no work, not an error.
 - **The image carries tools, never data.** No scenery, DEM, patches or imagery in any image layer. Content reaches the pod as mounts.
-- **Ortho4XP is pinned** to commit `a2af60e1e43069cdb33e32e12439936a78cb5083` (the sibling checkout's HEAD) by Containerfile build argument, recorded as an image label.
+- **Ortho4XP is pinned** to commit `c363134799e8130e1e897ff9064bc53d058f5ba9` — the head of `Shred86/Ortho4XP`'s `dev` branch, which is the merge of the operator's dem-crash fix (PR #90; the sibling checkout's HEAD `a2af60e` is its parent) — by Containerfile build argument, recorded as an image label. (Amended during execution: the original pin existed only in the local checkout; the operator designated Shred86 `dev` as the build target.)
 - **Commit messages end with** `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`, preceded by a blank line or git parses no trailer. Verify with `git log -1 --format='%(trailers)'`.
 - **After committing, confirm what you committed:** `git status --porcelain` empty, `git show HEAD:<path>` contains the change.
 - **Do not state derived counts in prose**; name the things. The conformance parity test remains the one enforced count.
@@ -75,8 +75,8 @@ across resubmissions of an unchanged spec, because the store compares it.
 # worker/Containerfile
 FROM docker.io/library/python:3.12-slim
 
-ARG ORTHO4XP_REPO=https://github.com/oscarpilote/Ortho4XP.git
-ARG ORTHO4XP_COMMIT=a2af60e1e43069cdb33e32e12439936a78cb5083
+ARG ORTHO4XP_REPO=https://github.com/Shred86/Ortho4XP.git
+ARG ORTHO4XP_COMMIT=c363134799e8130e1e897ff9064bc53d058f5ba9
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git p7zip-full \
