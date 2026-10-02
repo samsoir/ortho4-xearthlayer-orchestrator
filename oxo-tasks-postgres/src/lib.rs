@@ -85,6 +85,48 @@ impl PostgresTaskStore {
         }
         Ok(())
     }
+
+    /// Count tasks per state for one job, in one query. Shared by the gate
+    /// and the throughput snapshot so the two cannot disagree.
+    async fn tally(
+        &self,
+        job_id: JobId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Throughput, TaskStoreError> {
+        let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM jobs WHERE id = $1")
+            .bind(job_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(adapter)?;
+        if exists.is_none() {
+            return Err(TaskStoreError::UnknownJob { job_id });
+        }
+
+        let (pending, claimable_now, claimed, succeeded, abandoned): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT \
+                     count(*) FILTER (WHERE state = 'pending'), \
+                     count(*) FILTER (WHERE state = 'pending' AND claimable_at <= $2), \
+                     count(*) FILTER (WHERE state = 'claimed'), \
+                     count(*) FILTER (WHERE state = 'succeeded'), \
+                     count(*) FILTER (WHERE state = 'abandoned') \
+                 FROM tasks WHERE job_id = $1",
+            )
+            .bind(job_id.as_uuid())
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(adapter)?;
+
+        let count = |value: i64| u32::try_from(value).unwrap_or(u32::MAX);
+        Ok(Throughput {
+            pending: count(pending),
+            claimable_now: count(claimable_now),
+            claimed: count(claimed),
+            succeeded: count(succeeded),
+            abandoned: count(abandoned),
+        })
+    }
 }
 
 /// Adapter failures become `TaskStoreError::Adapter`, which is the only
@@ -441,10 +483,30 @@ impl TaskStore for PostgresTaskStore {
         }
         Ok(outcome)
     }
-    async fn job_status(&self, _job_id: JobId) -> Result<JobStatus, TaskStoreError> {
-        unimplemented!("Task 12")
+    async fn job_status(&self, job_id: JobId) -> Result<JobStatus, TaskStoreError> {
+        let now = self.clock.now();
+        let tally = self.tally(job_id, now).await?;
+
+        if tally.pending == 0 && tally.claimed == 0 {
+            return Ok(if tally.abandoned == 0 {
+                JobStatus::Complete
+            } else {
+                JobStatus::Failed {
+                    abandoned: tally.abandoned,
+                }
+            });
+        }
+
+        Ok(JobStatus::InProgress {
+            pending: tally.pending,
+            claimed: tally.claimed,
+            succeeded: tally.succeeded,
+            abandoned: tally.abandoned,
+        })
     }
-    async fn throughput(&self, _job_id: JobId) -> Result<Throughput, TaskStoreError> {
-        unimplemented!("Task 12")
+
+    async fn throughput(&self, job_id: JobId) -> Result<Throughput, TaskStoreError> {
+        let now = self.clock.now();
+        self.tally(job_id, now).await
     }
 }
