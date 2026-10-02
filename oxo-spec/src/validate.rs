@@ -343,6 +343,21 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_zero_spelling_is_a_fault_not_a_silent_duplicate() {
+        let mut errors = Vec::new();
+        let input = vec!["+50+000".to_string(), "+50-000".to_string()];
+        let tiles = validate_tiles(&input, &mut errors);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidTileId {
+                value: "+50-000".to_string(),
+                reason: TileIdParseError::NonCanonicalNegativeZero { field: "longitude" },
+            }]
+        );
+    }
+
+    #[test]
     fn a_malformed_tile_is_reported_once_per_distinct_value() {
         let mut errors = Vec::new();
         let input = vec![

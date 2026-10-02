@@ -9,6 +9,12 @@ use std::str::FromStr;
 /// signed three-digit longitude, zero padded after the sign. Latitude
 /// takes two digits because 90 is the largest magnitude; longitude takes
 /// three because 180 is.
+///
+/// The mapping from string to `TileId` is injective: the form is
+/// fixed-width with mandatory signs and zero-padded ASCII digits, so each
+/// non-zero value has exactly one spelling, and zero has exactly one
+/// because a `-` sign on a zero magnitude is rejected. One tile therefore
+/// cannot be named by two different strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TileId {
     lat: i8,
@@ -18,17 +24,34 @@ pub struct TileId {
 /// Why a string could not be read as a [`TileId`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TileIdParseError {
-    WrongLength { got: usize },
+    NonAscii,
+    WrongLength {
+        got: usize,
+    },
     MissingLatSign,
     MissingLonSign,
-    NonDigit { position: usize },
-    LatOutOfRange { lat: i32 },
-    LonOutOfRange { lon: i32 },
+    NonDigit {
+        position: usize,
+    },
+    LatOutOfRange {
+        lat: i32,
+    },
+    LonOutOfRange {
+        lon: i32,
+    },
+    /// A `-` sign on a zero magnitude, e.g. `-00` or `-000`. Zero has one
+    /// canonical spelling, so that a string denotes exactly one tile.
+    NonCanonicalNegativeZero {
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for TileIdParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NonAscii => {
+                write!(f, "identifier must be ASCII")
+            }
             Self::WrongLength { got } => {
                 write!(f, "expected 7 characters, got {got}")
             }
@@ -53,6 +76,9 @@ impl fmt::Display for TileIdParseError {
                 TileId::LON_MIN,
                 TileId::LON_MAX
             ),
+            Self::NonCanonicalNegativeZero { field } => {
+                write!(f, "{field} zero must be written with a + sign")
+            }
         }
     }
 }
@@ -101,6 +127,9 @@ impl FromStr for TileId {
     type Err = TileIdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if !s.is_ascii() {
+            return Err(TileIdParseError::NonAscii);
+        }
         let bytes = s.as_bytes();
         if bytes.len() != 7 {
             return Err(TileIdParseError::WrongLength {
@@ -118,8 +147,22 @@ impl FromStr for TileId {
             _ => return Err(TileIdParseError::MissingLonSign),
         };
 
-        let lat = read_digits(&bytes[1..3], 1)? * lat_sign;
-        let lon = read_digits(&bytes[4..7], 4)? * lon_sign;
+        let lat_magnitude = read_digits(&bytes[1..3], 1)?;
+        let lon_magnitude = read_digits(&bytes[4..7], 4)?;
+
+        // Zero has one canonical spelling. Accepting `-00`/`-000` as well
+        // would make two distinct strings denote one tile, which defeats
+        // duplicate detection: the design document makes a repeated tile a
+        // fault rather than a silent dedupe.
+        if lat_sign < 0 && lat_magnitude == 0 {
+            return Err(TileIdParseError::NonCanonicalNegativeZero { field: "latitude" });
+        }
+        if lon_sign < 0 && lon_magnitude == 0 {
+            return Err(TileIdParseError::NonCanonicalNegativeZero { field: "longitude" });
+        }
+
+        let lat = lat_magnitude * lat_sign;
+        let lon = lon_magnitude * lon_sign;
 
         if !(i32::from(Self::LAT_MIN)..=i32::from(Self::LAT_MAX)).contains(&lat) {
             return Err(TileIdParseError::LatOutOfRange { lat });
@@ -235,6 +278,51 @@ mod tests {
         assert_eq!(
             "+5a-002".parse::<TileId>(),
             Err(TileIdParseError::NonDigit { position: 2 })
+        );
+    }
+
+    #[test]
+    fn lat_and_lon_report_the_coordinates_they_were_built_from() {
+        let tile = TileId::new(-7, 110).expect("in range");
+        assert_eq!(tile.lat(), -7);
+        assert_eq!(tile.lon(), 110);
+    }
+
+    #[test]
+    fn rejects_a_negative_zero_latitude() {
+        assert_eq!(
+            "-00+000".parse::<TileId>(),
+            Err(TileIdParseError::NonCanonicalNegativeZero { field: "latitude" })
+        );
+    }
+
+    #[test]
+    fn rejects_a_negative_zero_longitude() {
+        assert_eq!(
+            "+50-000".parse::<TileId>(),
+            Err(TileIdParseError::NonCanonicalNegativeZero { field: "longitude" })
+        );
+    }
+
+    #[test]
+    fn zero_has_exactly_one_accepted_spelling() {
+        assert_eq!(
+            "+00+000".parse::<TileId>().expect("canonical zero"),
+            TileId::new(0, 0).expect("in range")
+        );
+        for spelling in ["-00+000", "+00-000", "-00-000"] {
+            assert!(
+                spelling.parse::<TileId>().is_err(),
+                "{spelling} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_non_ascii_identifier_before_counting_length() {
+        assert_eq!(
+            "+50-00\u{a3}".parse::<TileId>(),
+            Err(TileIdParseError::NonAscii)
         );
     }
 
