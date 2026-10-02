@@ -14,6 +14,13 @@ pub const ZOOM_MIN: u8 = 10;
 /// validation and belongs to the control plane.
 pub const ZOOM_MAX: u8 = 20;
 
+/// Longest accepted provider code.
+///
+/// Shared with the message that reports a rejection, so the bound and the
+/// text that explains it cannot drift apart, and so the later API and web
+/// interface enforce this bound rather than re-deriving one.
+pub const PROVIDER_CODE_MAX_LEN: usize = 64;
+
 /// Ortho4XP tile-configuration keys owned by curated fields, paired with
 /// the field that owns each. A raw override naming one of these is a
 /// validation error rather than a silent shadow.

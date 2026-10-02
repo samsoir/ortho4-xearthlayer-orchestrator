@@ -17,8 +17,10 @@ pub mod target;
 pub mod tile;
 pub mod validate;
 
-pub use metadata::Metadata;
-pub use parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
+pub use metadata::{Metadata, REGION_CODE_MAX_LEN};
+pub use parameters::{
+    ProductionParameters, PROVIDER_CODE_MAX_LEN, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN,
+};
 pub use policy::FailurePolicy;
 pub use raw::RawRegionSpec;
 pub use spec::{RegionSpec, SpecError};

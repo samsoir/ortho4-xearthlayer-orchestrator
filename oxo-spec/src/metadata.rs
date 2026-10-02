@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// Longest accepted region code.
+///
+/// Shared with the message that reports a rejection, so the bound and the
+/// text that explains it cannot drift apart, and so the later API and web
+/// interface enforce this bound rather than re-deriving one.
+pub const REGION_CODE_MAX_LEN: usize = 16;
+
 /// Identifying information for a region.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

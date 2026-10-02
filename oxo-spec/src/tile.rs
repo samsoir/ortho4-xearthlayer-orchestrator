@@ -22,7 +22,11 @@ pub struct TileId {
 }
 
 /// Why a string could not be read as a [`TileId`].
+///
+/// `#[non_exhaustive]`: three downstream sub-projects will match on this,
+/// and a new reason must not break their builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TileIdParseError {
     NonAscii,
     WrongLength {

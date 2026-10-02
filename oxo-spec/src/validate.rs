@@ -1,14 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::metadata::Metadata;
-use crate::parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
+use crate::metadata::{Metadata, REGION_CODE_MAX_LEN};
+use crate::parameters::{
+    ProductionParameters, PROVIDER_CODE_MAX_LEN, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN,
+};
 use crate::policy::FailurePolicy;
 use crate::target::TargetLocation;
 use crate::tile::{TileId, TileIdParseError};
 
 /// A single static-validation fault.
+///
+/// `#[non_exhaustive]`: three downstream sub-projects will match on this,
+/// and a new rule must not break their builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValidationError {
     EmptyTileSet,
     InvalidTileId {
@@ -70,9 +76,9 @@ impl fmt::Display for ValidationError {
             Self::EmptyProviderCode => write!(f, "provider code is empty"),
             Self::InvalidProviderCode { value } => write!(
                 f,
-                "provider code {value:?} is malformed: expected at most 64 \
-                 characters with no whitespace, control characters or path \
-                 separators"
+                "provider code {value:?} is malformed: expected at most \
+                 {PROVIDER_CODE_MAX_LEN} characters with no whitespace, \
+                 control characters or path separators"
             ),
             Self::ReservedRawKey { key, curated_field } => write!(
                 f,
@@ -94,8 +100,8 @@ impl fmt::Display for ValidationError {
             Self::EmptyRegionCode => write!(f, "region code is empty"),
             Self::InvalidRegionCode { value } => write!(
                 f,
-                "region code {value:?} is malformed: expected at most 16 \
-                 characters of A-Z, 0-9 and '-'"
+                "region code {value:?} is malformed: expected at most \
+                 {REGION_CODE_MAX_LEN} characters of A-Z, 0-9 and '-'"
             ),
             Self::RevisionTooLow => write!(f, "revision must be at least 1"),
             Self::EmptyTargetRoot => write!(f, "target root is empty"),
@@ -284,7 +290,7 @@ const LINE_BREAK_REASON: &str =
      would inject a second setting";
 
 fn is_well_formed_provider_code(code: &str) -> bool {
-    code.len() <= 64
+    code.len() <= PROVIDER_CODE_MAX_LEN
         && !code.contains('/')
         && !code.contains('\\')
         && code.chars().all(|c| !c.is_whitespace() && !c.is_control())
@@ -310,7 +316,7 @@ pub(crate) fn validate_metadata(metadata: &Metadata, errors: &mut Vec<Validation
 }
 
 fn is_well_formed_region_code(code: &str) -> bool {
-    code.len() <= 16
+    code.len() <= REGION_CODE_MAX_LEN
         && code
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
@@ -829,7 +835,7 @@ mod tests {
     fn the_region_code_length_ceiling_is_sixteen() {
         let mut errors = Vec::new();
         let mut m = metadata();
-        m.region_code = "A".repeat(16);
+        m.region_code = "A".repeat(REGION_CODE_MAX_LEN);
         validate_metadata(&m, &mut errors);
         assert!(
             errors.is_empty(),
@@ -838,12 +844,12 @@ mod tests {
 
         let mut errors = Vec::new();
         let mut m = metadata();
-        m.region_code = "A".repeat(17);
+        m.region_code = "A".repeat(REGION_CODE_MAX_LEN + 1);
         validate_metadata(&m, &mut errors);
         assert_eq!(
             errors,
             vec![ValidationError::InvalidRegionCode {
-                value: "A".repeat(17)
+                value: "A".repeat(REGION_CODE_MAX_LEN + 1)
             }]
         );
     }
@@ -866,7 +872,7 @@ mod tests {
     fn the_provider_code_length_ceiling_is_sixty_four() {
         let mut errors = Vec::new();
         let mut p = parameters();
-        p.provider = "B".repeat(64);
+        p.provider = "B".repeat(PROVIDER_CODE_MAX_LEN);
         validate_parameters(&p, &mut errors);
         assert!(
             errors.is_empty(),
@@ -875,12 +881,12 @@ mod tests {
 
         let mut errors = Vec::new();
         let mut p = parameters();
-        p.provider = "B".repeat(65);
+        p.provider = "B".repeat(PROVIDER_CODE_MAX_LEN + 1);
         validate_parameters(&p, &mut errors);
         assert_eq!(
             errors,
             vec![ValidationError::InvalidProviderCode {
-                value: "B".repeat(65)
+                value: "B".repeat(PROVIDER_CODE_MAX_LEN + 1)
             }]
         );
     }
