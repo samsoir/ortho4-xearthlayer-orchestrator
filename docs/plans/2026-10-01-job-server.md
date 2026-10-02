@@ -501,44 +501,23 @@ mod tests {
         assert_ne!(request.tasks[0].task_type, request.tasks[1].task_type);
     }
 
-    #[test]
-    fn a_claim_request_with_no_filter_means_any_task_type() {
-        let request = ClaimRequest {
-            worker: "pod-1".to_string(),
-            task_types: None,
-        };
-        assert!(request.task_types.is_none());
-    }
-
-    #[test]
-    fn a_fail_outcome_distinguishes_requeued_from_abandoned() {
-        let requeued = FailOutcome::Requeued {
-            claimable_at: chrono::Utc::now(),
-            attempts_remaining: 2,
-        };
-        let abandoned = FailOutcome::Abandoned;
-        assert_ne!(
-            std::mem::discriminant(&requeued),
-            std::mem::discriminant(&abandoned)
-        );
-    }
-
-    #[test]
-    fn a_job_status_distinguishes_its_three_shapes() {
-        let complete = JobStatus::Complete;
-        let failed = JobStatus::Failed { abandoned: 1 };
-        let in_progress = JobStatus::InProgress {
-            pending: 1,
-            claimed: 0,
-            succeeded: 0,
-            abandoned: 0,
-        };
-        assert_ne!(complete, failed);
-        assert_ne!(failed, in_progress);
-        assert_ne!(complete, in_progress);
-    }
+    // Only one test here, and deliberately so. These are plain data
+    // definitions, so the red-green driver is compilation: before the types
+    // exist this module does not compile, and after they do it does. Three
+    // further tests were drafted and removed during the pre-flight scan —
+    // two asserted that distinct enum variants differ, which can never
+    // fail, one asserted that a field just set to `None` is `None`, and one
+    // of them called `Utc::now()` directly, which the Global Constraints
+    // forbid. Behavioural coverage of every one of these types arrives in
+    // Tasks 4 through 8, which assert concrete values such as
+    // `FailOutcome::Abandoned` and `JobStatus::Complete`.
 }
 ```
+
+**This task's RED is a compile failure, not an assertion failure.** That is
+legitimate for pure data definitions: the test module cannot compile until
+the types exist. Say so plainly in your report and paste the compiler error
+— do not invent an assertion that fails for show.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
