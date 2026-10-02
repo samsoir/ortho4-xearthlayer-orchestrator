@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::parameters::{ZOOM_MAX, ZOOM_MIN};
+use crate::parameters::{ProductionParameters, RESERVED_RAW_KEYS, ZOOM_MAX, ZOOM_MIN};
 use crate::tile::{TileId, TileIdParseError};
 
 /// A single static-validation fault.
@@ -176,6 +176,48 @@ pub(crate) fn validate_tiles(
     tiles
 }
 
+/// Validate production parameters.
+///
+/// Provider codes are checked for shape only. Whether a code exists is a
+/// property of an Ortho4XP installation — codes are `.lay` filenames under
+/// `Providers/` — and so is whether that provider permits the requested
+/// zoom. Both are environmental validation, owned by the control plane.
+#[allow(dead_code)]
+pub(crate) fn validate_parameters(
+    parameters: &ProductionParameters,
+    errors: &mut Vec<ValidationError>,
+) {
+    if parameters.provider.is_empty() {
+        errors.push(ValidationError::EmptyProviderCode);
+    } else if !is_well_formed_provider_code(&parameters.provider) {
+        errors.push(ValidationError::InvalidProviderCode {
+            value: parameters.provider.clone(),
+        });
+    }
+
+    if !(ZOOM_MIN..=ZOOM_MAX).contains(&parameters.zoom) {
+        errors.push(ValidationError::ZoomOutOfRange {
+            zoom: parameters.zoom,
+        });
+    }
+
+    for &(key, curated_field) in RESERVED_RAW_KEYS {
+        if parameters.raw.contains_key(key) {
+            errors.push(ValidationError::ReservedRawKey {
+                key: key.to_string(),
+                curated_field,
+            });
+        }
+    }
+}
+
+fn is_well_formed_provider_code(code: &str) -> bool {
+    code.len() <= 64
+        && !code.contains('/')
+        && !code.contains('\\')
+        && code.chars().all(|c| !c.is_whitespace() && !c.is_control())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +339,101 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn parameters() -> ProductionParameters {
+        ProductionParameters {
+            provider: "BI".to_string(),
+            zoom: 16,
+            include_overlays: false,
+            raw: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn well_formed_parameters_pass() {
+        let mut errors = Vec::new();
+        validate_parameters(&parameters(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn an_empty_provider_code_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.provider = String::new();
+        validate_parameters(&p, &mut errors);
+        assert_eq!(errors, vec![ValidationError::EmptyProviderCode]);
+    }
+
+    #[test]
+    fn a_provider_code_with_a_path_separator_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.provider = "Global/BI".to_string();
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidProviderCode {
+                value: "Global/BI".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_codes_ortho4xp_actually_ships_are_accepted() {
+        for code in ["BI", "GO2", "Arc", "Arc@", "EOX", "USA2", "EUR.comb"] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.provider = code.to_string();
+            validate_parameters(&p, &mut errors);
+            assert!(errors.is_empty(), "{code} rejected: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_zoom_outside_the_band_is_a_fault() {
+        for zoom in [9u8, 21u8] {
+            let mut errors = Vec::new();
+            let mut p = parameters();
+            p.zoom = zoom;
+            validate_parameters(&p, &mut errors);
+            assert_eq!(errors, vec![ValidationError::ZoomOutOfRange { zoom }]);
+        }
+    }
+
+    #[test]
+    fn a_raw_key_owned_by_a_curated_field_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert("default_zl".to_string(), "18".to_string());
+        p.raw
+            .insert("default_website".to_string(), "GO2".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![
+                ValidationError::ReservedRawKey {
+                    key: "default_website".to_string(),
+                    curated_field: "provider",
+                },
+                ValidationError::ReservedRawKey {
+                    key: "default_zl".to_string(),
+                    curated_field: "zoom",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unreserved_raw_key_is_fine() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert(
+            "cover_airports_with_highres".to_string(),
+            "ICAO".to_string(),
+        );
+        validate_parameters(&p, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }
