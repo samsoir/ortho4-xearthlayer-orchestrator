@@ -322,12 +322,27 @@ fn is_well_formed_region_code(code: &str) -> bool {
 /// depending on where a pod happens to start, which is exactly the
 /// ambiguity a specification exists to remove. Whether the path exists or
 /// is writable is environmental validation.
+///
+/// Target roots are **POSIX-absolute** — they begin with `/` — because OXO
+/// targets Linux containers. The rule reads the string form rather than
+/// asking `Path::is_absolute`, whose answer depends on the host OS: the same
+/// specification text must validate identically on an operator's laptop and
+/// in the Linux control plane, which is what "a pure function of the model"
+/// means. A root that is not valid UTF-8 has no string form to check, so it
+/// is reported as not absolute rather than panicking or passing silently.
 pub(crate) fn validate_target(target: &TargetLocation, errors: &mut Vec<ValidationError>) {
-    if target.root.as_os_str().is_empty() {
-        errors.push(ValidationError::EmptyTargetRoot);
-    } else if !target.root.is_absolute() {
+    let Some(root) = target.root.to_str() else {
         errors.push(ValidationError::TargetRootNotAbsolute {
-            value: target.root.display().to_string(),
+            value: target.root.to_string_lossy().into_owned(),
+        });
+        return;
+    };
+
+    if root.is_empty() {
+        errors.push(ValidationError::EmptyTargetRoot);
+    } else if !root.starts_with('/') {
+        errors.push(ValidationError::TargetRootNotAbsolute {
+            value: root.to_string(),
         });
     }
 }
@@ -734,6 +749,44 @@ mod tests {
             vec![ValidationError::TargetRootNotAbsolute {
                 value: "artifacts/NA".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn a_windows_style_root_is_not_absolute_on_any_host() {
+        let mut errors = Vec::new();
+        validate_target(
+            &TargetLocation {
+                root: std::path::PathBuf::from("C:\\srv\\oxo"),
+            },
+            &mut errors,
+        );
+        assert_eq!(
+            errors,
+            vec![ValidationError::TargetRootNotAbsolute {
+                value: "C:\\srv\\oxo".to_string()
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_not_utf8_is_a_fault_rather_than_a_panic() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut errors = Vec::new();
+        validate_target(
+            &TargetLocation {
+                root: std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![
+                    b'/', 0xff, b'x',
+                ])),
+            },
+            &mut errors,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            matches!(errors[0], ValidationError::TargetRootNotAbsolute { .. }),
+            "{errors:?}"
         );
     }
 
