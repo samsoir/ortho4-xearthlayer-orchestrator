@@ -2201,7 +2201,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
         let store = store(clock());
         let mut empty = two_tile_job();
         empty.tasks.clear();
-        let error = store.create_job(empty).await.expect_err("empty run");
+        let error = store.create_job(empty).await.expect_err("an empty job is refused");
         assert!(
             matches!(error, TaskStoreError::EmptyJob { .. }),
             "expected EmptyJob, got {error:?}"
@@ -2305,7 +2305,7 @@ Then replace the three stubs:
         let policies: BTreeMap<JobId, (u32, Duration)> = state
             .jobs
             .iter()
-            .map(|(id, run)| (*id, (job.max_attempts, job.backoff)))
+            .map(|(id, job)| (*id, (job.max_attempts, job.backoff)))
             .collect();
 
         let expired: Vec<TaskId> = state
@@ -2515,7 +2515,7 @@ fn tile(lat: i8, lon: i16) -> TileId {
 }
 
 /// Two tasks for one tile: the ortho build and its overlay.
-pub fn two_task_task() -> CreateJob {
+pub fn two_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
@@ -2531,6 +2531,24 @@ pub fn two_task_task() -> CreateJob {
                 task_type: TaskType::Overlay,
             },
         ],
+    }
+}
+
+/// One task, for a case that follows a single task through its whole life.
+///
+/// A two-task job derails such a case: claims come out oldest-claimable
+/// first, so a requeued task sorts *behind* its never-claimed sibling and
+/// the next claim hands back the sibling instead.
+pub fn one_task_job() -> CreateJob {
+    CreateJob {
+        region_code: "NA".to_string(),
+        revision: 1,
+        max_attempts: 3,
+        backoff: Duration::from_secs(60),
+        tasks: vec![TaskSpec {
+            tile: tile(50, -2),
+            task_type: TaskType::Ortho,
+        }],
     }
 }
 
@@ -2552,8 +2570,8 @@ fn lease_of(task: &ClaimedTask) -> Lease {
 
 pub async fn creating_a_job_twice_resumes_it(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let first = subject.store.create_job(two_task_task()).await.expect("create");
-    let second = subject.store.create_job(two_task_task()).await.expect("resume");
+    let first = subject.store.create_job(two_task_job()).await.expect("create");
+    let second = subject.store.create_job(two_task_job()).await.expect("resume");
     assert!(first.created);
     assert!(!second.created);
     assert_eq!(first.job_id, second.job_id);
@@ -2562,8 +2580,8 @@ pub async fn creating_a_job_twice_resumes_it(fixture: &dyn Fixture) {
 
 pub async fn a_changed_task_set_under_one_identity_conflicts(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
-    let mut altered = two_task_task();
+    subject.store.create_job(two_task_job()).await.expect("create");
+    let mut altered = two_task_job();
     altered.tasks.push(TaskSpec {
         tile: tile(51, -2),
         task_type: TaskType::Ortho,
@@ -2581,7 +2599,7 @@ pub async fn a_changed_task_set_under_one_identity_conflicts(fixture: &dyn Fixtu
 
 pub async fn a_job_with_no_tasks_is_refused(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut empty = two_task_task();
+    let mut empty = two_task_job();
     empty.tasks.clear();
     let error = subject
         .store
@@ -2611,7 +2629,7 @@ pub async fn a_job_with_a_duplicated_task_is_refused(fixture: &dyn Fixture) {
 
 pub async fn every_task_is_handed_out_exactly_once(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
 
     let mut seen = Vec::new();
     while let Some(task) = subject
@@ -2644,7 +2662,7 @@ pub async fn an_empty_queue_yields_none_not_an_error(fixture: &dyn Fixture) {
 
 pub async fn a_task_type_filter_is_honoured(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let claimed = subject
         .store
         .claim(ClaimRequest {
@@ -2659,7 +2677,7 @@ pub async fn a_task_type_filter_is_honoured(fixture: &dyn Fixture) {
 
 pub async fn a_stale_lease_is_refused_by_every_reporting_call(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2690,9 +2708,115 @@ pub async fn a_stale_lease_is_refused_by_every_reporting_call(fixture: &dyn Fixt
     }
 }
 
+/// The token a reclaimed worker still holds must be refused.
+///
+/// This is the at-most-once guarantee, and the case above cannot test it: a
+/// freshly generated token is refused by an adapter that compares tokens
+/// properly AND by one that stores no token at all. Only the *genuine
+/// previous* token separates them. Get this wrong and two workers both
+/// believe they own the task, so one silently clobbers the other's report.
+pub async fn a_reclaimed_task_refuses_its_previous_holder(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    // One task, so the re-claim below cannot hand back a sibling.
+    subject.store.create_job(one_task_job()).await.expect("create");
+
+    let first = subject
+        .store
+        .claim(any_task("pod-a"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let abandoned = lease_of(&first);
+
+    // The worker goes silent and the reaper takes the task back.
+    subject.clock.advance(Duration::from_secs(120));
+    let reaped = subject
+        .store
+        .reap_expired(ReapRequest {
+            heartbeat_timeout: Duration::from_secs(90),
+            max_task_duration: Duration::from_secs(86_400),
+        })
+        .await
+        .expect("reap");
+    assert_eq!(reaped.requeued, 1, "the silent worker's task is reclaimed");
+
+    // A reaped task takes backoff, so wait it out, then let a second worker
+    // take it. That worker now holds the only valid token.
+    subject.clock.advance(Duration::from_secs(60));
+    let second = subject
+        .store
+        .claim(any_task("pod-b"))
+        .await
+        .expect("claim")
+        .expect("the reclaimed task is handed out again");
+    assert_eq!(second.task_id, first.task_id, "the same task came back");
+    assert_ne!(
+        second.lease, first.lease,
+        "a re-claim must mint a fresh token, or the old holder still has a live lease"
+    );
+
+    // The original holder is refused by all three reporting calls.
+    for error in [
+        subject.store.heartbeat(abandoned).await.expect_err("heartbeat"),
+        subject.store.complete(abandoned).await.expect_err("complete"),
+        subject
+            .store
+            .fail(FailRequest {
+                lease: abandoned,
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect_err("fail"),
+    ] {
+        assert!(
+            matches!(error, TaskStoreError::LeaseLost { .. }),
+            "the previous holder must be told its lease is lost, got {error:?}"
+        );
+    }
+
+    // And the current holder is unaffected by that noise.
+    subject
+        .store
+        .complete(lease_of(&second))
+        .await
+        .expect("the current holder can still report");
+}
+
+/// All three reporting calls agree on what an unknown task is.
+///
+/// An adapter that reports on a task with a single conditional write —
+/// `WHERE id = $1 AND token = $2` — cannot tell "no such task" from "wrong
+/// token" and will answer `LeaseLost` for both. Callers distinguish them:
+/// one is a lost race to retry past, the other is a bug or a wiped store.
+pub async fn an_unknown_task_is_refused_by_every_reporting_call(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let nowhere = Lease {
+        task_id: crate::ids::TaskId::generate(),
+        token: crate::ids::LeaseToken::generate(),
+    };
+
+    for error in [
+        subject.store.heartbeat(nowhere).await.expect_err("heartbeat"),
+        subject.store.complete(nowhere).await.expect_err("complete"),
+        subject
+            .store
+            .fail(FailRequest {
+                lease: nowhere,
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect_err("fail"),
+    ] {
+        assert!(
+            matches!(error, TaskStoreError::UnknownTask { .. }),
+            "expected UnknownTask, got {error:?}"
+        );
+    }
+}
+
 pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.max_attempts = 2;
     subject.store.create_job(job).await.expect("create");
 
@@ -2740,7 +2864,7 @@ pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixtu
 
 pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.max_attempts = 1;
     subject.store.create_job(job).await.expect("create");
 
@@ -2764,7 +2888,7 @@ pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &d
 
 pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2790,7 +2914,7 @@ pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &d
 
 pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let job = subject.store.create_job(two_task_task()).await.expect("create");
+    let job = subject.store.create_job(two_task_job()).await.expect("create");
     assert!(matches!(
         subject.store.job_status(job.job_id).await.expect("status"),
         JobStatus::InProgress { pending: 2, .. }
@@ -2808,7 +2932,7 @@ pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) 
 
 pub async fn an_abandoned_task_is_visible_before_it_fails_the_job(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut spec = two_task_task();
+    let mut spec = two_task_job();
     spec.max_attempts = 1;
     let job = subject.store.create_job(spec).await.expect("create");
 
@@ -2864,7 +2988,7 @@ pub async fn an_unknown_job_is_refused_by_the_gate(fixture: &dyn Fixture) {
 
 pub async fn throughput_separates_pending_from_claimable_now(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let job = subject.store.create_job(two_task_task()).await.expect("create");
+    let job = subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2893,7 +3017,7 @@ pub async fn throughput_separates_pending_from_claimable_now(fixture: &dyn Fixtu
 /// claimants must between them see each task exactly once.
 pub async fn concurrent_claims_hand_each_task_out_exactly_once(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.tasks = (0..24)
         .map(|n| TaskSpec {
             tile: tile(50, -24 + n),
@@ -2957,6 +3081,8 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, an_empty_queue_yields_none_not_an_error);
         $crate::conformance_case!($fixture, a_task_type_filter_is_honoured);
         $crate::conformance_case!($fixture, a_stale_lease_is_refused_by_every_reporting_call);
+        $crate::conformance_case!($fixture, a_reclaimed_task_refuses_its_previous_holder);
+        $crate::conformance_case!($fixture, an_unknown_task_is_refused_by_every_reporting_call);
         $crate::conformance_case!($fixture, a_failure_is_requeued_until_the_budget_is_spent);
         $crate::conformance_case!($fixture, a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start);
         $crate::conformance_case!($fixture, a_diligent_but_wedged_worker_is_cut_off_by_the_backstop);
