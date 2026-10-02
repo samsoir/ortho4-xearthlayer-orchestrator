@@ -43,6 +43,48 @@ impl PostgresTaskStore {
     pub fn new(pool: PgPool, clock: Arc<dyn Clock>) -> Self {
         Self { pool, clock }
     }
+
+    /// Resolve a lease against one task, distinguishing the three ways it can
+    /// be invalid. A single query so the checks cannot drift apart between
+    /// the three reporting calls, and so the answer cannot change between
+    /// two of them.
+    ///
+    /// `FOR UPDATE` is load-bearing, and here it genuinely locks: the row
+    /// exists, so the lock holds for the caller's transaction and the reaper
+    /// cannot reclaim the task between this check and the write that follows
+    /// it. Without it the write's own `lease_token` predicate would match no
+    /// rows and the call would report success having changed nothing -- the
+    /// in-memory adapter holds its mutex across the whole operation, so it
+    /// has no such window. Note the contrast with `create_job`, where the
+    /// row does NOT yet exist and `FOR UPDATE` would lock nothing at all.
+    async fn resolve<'e, E>(executor: E, lease: Lease) -> Result<(), TaskStoreError>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        let row: Option<(String, Option<Uuid>)> =
+            sqlx::query_as("SELECT state, lease_token FROM tasks WHERE id = $1 FOR UPDATE")
+                .bind(lease.task_id.as_uuid())
+                .fetch_optional(executor)
+                .await
+                .map_err(adapter)?;
+
+        let Some((state, token)) = row else {
+            return Err(TaskStoreError::UnknownTask {
+                task_id: lease.task_id,
+            });
+        };
+        if state != "claimed" {
+            return Err(TaskStoreError::NotClaimed {
+                task_id: lease.task_id,
+            });
+        }
+        if token != Some(lease.token.as_uuid()) {
+            return Err(TaskStoreError::LeaseLost {
+                task_id: lease.task_id,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Adapter failures become `TaskStoreError::Adapter`, which is the only
@@ -264,17 +306,127 @@ impl TaskStore for PostgresTaskStore {
             attempt: u32::try_from(attempts).unwrap_or(u32::MAX),
         }))
     }
-    async fn heartbeat(&self, _lease: Lease) -> Result<(), TaskStoreError> {
-        unimplemented!("Task 11")
+    async fn heartbeat(&self, lease: Lease) -> Result<(), TaskStoreError> {
+        let now = self.clock.now();
+        let mut tx = self.pool.begin().await.map_err(adapter)?;
+        Self::resolve(&mut *tx, lease).await?;
+        sqlx::query("UPDATE tasks SET last_heartbeat_at = $1 WHERE id = $2 AND lease_token = $3")
+            .bind(now)
+            .bind(lease.task_id.as_uuid())
+            .bind(lease.token.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(adapter)?;
+        tx.commit().await.map_err(adapter)
     }
-    async fn complete(&self, _lease: Lease) -> Result<(), TaskStoreError> {
-        unimplemented!("Task 11")
+
+    async fn complete(&self, lease: Lease) -> Result<(), TaskStoreError> {
+        let mut tx = self.pool.begin().await.map_err(adapter)?;
+        Self::resolve(&mut *tx, lease).await?;
+        sqlx::query(
+            "UPDATE tasks SET state = 'succeeded', lease_token = NULL, claimed_by = NULL, \
+                 claimed_at = NULL, last_heartbeat_at = NULL \
+             WHERE id = $1 AND lease_token = $2",
+        )
+        .bind(lease.task_id.as_uuid())
+        .bind(lease.token.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(adapter)?;
+        tx.commit().await.map_err(adapter)
     }
-    async fn fail(&self, _request: FailRequest) -> Result<FailOutcome, TaskStoreError> {
-        unimplemented!("Task 11")
+
+    async fn fail(&self, request: FailRequest) -> Result<FailOutcome, TaskStoreError> {
+        let now = self.clock.now();
+        let mut tx = self.pool.begin().await.map_err(adapter)?;
+        Self::resolve(&mut *tx, request.lease).await?;
+
+        let (attempts, max_attempts, backoff_secs): (i64, i64, i64) = sqlx::query_as(
+            "SELECT t.attempts, j.max_attempts, j.backoff_secs \
+             FROM tasks t JOIN jobs j ON j.id = t.job_id WHERE t.id = $1",
+        )
+        .bind(request.lease.task_id.as_uuid())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(adapter)?;
+
+        let outcome = if attempts >= max_attempts {
+            sqlx::query(
+                "UPDATE tasks SET state = 'abandoned', lease_token = NULL, claimed_by = NULL, \
+                     claimed_at = NULL, last_heartbeat_at = NULL, last_failure = $2 \
+                 WHERE id = $1",
+            )
+            .bind(request.lease.task_id.as_uuid())
+            .bind(&request.reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(adapter)?;
+            FailOutcome::Abandoned
+        } else {
+            let claimable_at = now + chrono::Duration::seconds(backoff_secs);
+            sqlx::query(
+                "UPDATE tasks SET state = 'pending', claimable_at = $2, lease_token = NULL, \
+                     claimed_by = NULL, claimed_at = NULL, last_heartbeat_at = NULL, \
+                     last_failure = $3 \
+                 WHERE id = $1",
+            )
+            .bind(request.lease.task_id.as_uuid())
+            .bind(claimable_at)
+            .bind(&request.reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(adapter)?;
+            FailOutcome::Requeued {
+                claimable_at,
+                attempts_remaining: u32::try_from(max_attempts - attempts).unwrap_or(0),
+            }
+        };
+
+        tx.commit().await.map_err(adapter)?;
+        Ok(outcome)
     }
-    async fn reap_expired(&self, _request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
-        unimplemented!("Task 11")
+
+    async fn reap_expired(&self, request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
+        let now = self.clock.now();
+        let heartbeat_cutoff = now
+            - chrono::Duration::from_std(request.heartbeat_timeout)
+                .unwrap_or(chrono::Duration::zero());
+        let duration_cutoff = now
+            - chrono::Duration::from_std(request.max_task_duration)
+                .unwrap_or(chrono::Duration::zero());
+
+        // One statement so a concurrent reaper cannot double-count: each
+        // expired row is updated by exactly one of them. The CASE spends the
+        // start that was already consumed at claim, abandoning when the
+        // budget is gone and requeueing with backoff otherwise.
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "UPDATE tasks AS t SET \
+                 state = CASE WHEN t.attempts >= j.max_attempts THEN 'abandoned' ELSE 'pending' END, \
+                 claimable_at = CASE WHEN t.attempts >= j.max_attempts THEN t.claimable_at \
+                                     ELSE $1 + (j.backoff_secs * interval '1 second') END, \
+                 lease_token = NULL, claimed_by = NULL, claimed_at = NULL, \
+                 last_heartbeat_at = NULL \
+             FROM jobs AS j \
+             WHERE j.id = t.job_id AND t.state = 'claimed' \
+               AND (t.last_heartbeat_at < $2 OR t.claimed_at < $3) \
+             RETURNING t.state",
+        )
+        .bind(now)
+        .bind(heartbeat_cutoff)
+        .bind(duration_cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(adapter)?;
+
+        let mut outcome = ReapOutcome::default();
+        for (state,) in rows {
+            if state == "abandoned" {
+                outcome.abandoned += 1;
+            } else {
+                outcome.requeued += 1;
+            }
+        }
+        Ok(outcome)
     }
     async fn job_status(&self, _job_id: JobId) -> Result<JobStatus, TaskStoreError> {
         unimplemented!("Task 12")
