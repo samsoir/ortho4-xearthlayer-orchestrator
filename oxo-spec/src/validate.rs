@@ -143,7 +143,6 @@ impl std::error::Error for ValidationReport {}
 /// twice yields one `InvalidTileId` and one `DuplicateTile`, rather than
 /// two of the former. Iterating a `BTreeMap` also makes fault order
 /// deterministic, which matters for testing and for diffable output.
-#[allow(dead_code)]
 pub(crate) fn validate_tiles(
     raw: &[String],
     errors: &mut Vec<ValidationError>,
@@ -185,7 +184,6 @@ pub(crate) fn validate_tiles(
 /// property of an Ortho4XP installation — codes are `.lay` filenames under
 /// `Providers/` — and so is whether that provider permits the requested
 /// zoom. Both are environmental validation, owned by the control plane.
-#[allow(dead_code)]
 pub(crate) fn validate_parameters(
     parameters: &ProductionParameters,
     errors: &mut Vec<ValidationError>,
@@ -222,7 +220,6 @@ fn is_well_formed_provider_code(code: &str) -> bool {
 }
 
 /// Validate region metadata.
-#[allow(dead_code)]
 pub(crate) fn validate_metadata(metadata: &Metadata, errors: &mut Vec<ValidationError>) {
     if metadata.name.trim().is_empty() {
         errors.push(ValidationError::EmptyName);
@@ -254,7 +251,6 @@ fn is_well_formed_region_code(code: &str) -> bool {
 /// depending on where a pod happens to start, which is exactly the
 /// ambiguity a specification exists to remove. Whether the path exists or
 /// is writable is environmental validation.
-#[allow(dead_code)]
 pub(crate) fn validate_target(target: &TargetLocation, errors: &mut Vec<ValidationError>) {
     if target.root.as_os_str().is_empty() {
         errors.push(ValidationError::EmptyTargetRoot);
@@ -271,7 +267,6 @@ pub(crate) fn validate_target(target: &TargetLocation, errors: &mut Vec<Validati
 /// design document's "non-negative backoff" requirement is enforced by the
 /// type, and alert destinations are opaque until the observability
 /// sub-project decides their representation.
-#[allow(dead_code)]
 pub(crate) fn validate_failure_policy(policy: &FailurePolicy, errors: &mut Vec<ValidationError>) {
     if policy.max_attempts < 1 {
         errors.push(ValidationError::MaxAttemptsTooLow);
