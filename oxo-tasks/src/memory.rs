@@ -89,6 +89,19 @@ fn task_key(spec: &TaskSpec) -> (TileId, TaskType) {
 #[async_trait]
 impl TaskStore for InMemoryTaskStore {
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        // Refuse a duplicated pair before anything else. Deduplicating would
+        // make total_tasks disagree with the request, and would diverge from
+        // the PostgreSQL adapter, whose unique constraint collapses it.
+        let mut seen = BTreeSet::new();
+        for spec in &request.tasks {
+            if !seen.insert((spec.tile, spec.task_type)) {
+                return Err(TaskStoreError::DuplicateTask {
+                    tile: spec.tile,
+                    task_type: spec.task_type,
+                });
+            }
+        }
+
         let now = self.clock.now();
         let mut state = self.locked();
         let identity = (request.region_code.clone(), request.revision);
@@ -229,7 +242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_a_run_reports_what_it_created() {
+    async fn creating_a_job_reports_what_it_created() {
         let store = store(clock());
         let created = store.create_job(two_tile_job()).await.expect("create");
         assert!(created.created);
@@ -237,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_the_same_run_again_resumes_rather_than_duplicating() {
+    async fn creating_the_same_job_again_resumes_rather_than_duplicating() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
         let second = store.create_job(two_tile_job()).await.expect("resume");
@@ -306,7 +319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_revisions_of_one_region_are_separate_runs() {
+    async fn two_revisions_of_one_region_are_separate_jobs() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
 
@@ -316,5 +329,37 @@ mod tests {
 
         assert_ne!(first.job_id, second.job_id);
         assert!(second.created);
+    }
+
+    #[tokio::test]
+    async fn a_task_set_with_a_duplicate_tile_and_task_type_is_refused() {
+        let store = store(clock());
+        let mut duped = two_tile_job();
+        // Push a duplicate of the first task
+        duped.tasks.push(TaskSpec {
+            tile: tile(50, -2),
+            task_type: TaskType::Ortho,
+        });
+
+        let error = store
+            .create_job(duped)
+            .await
+            .expect_err("should reject duplicate");
+        assert!(
+            matches!(error, TaskStoreError::DuplicateTask { .. }),
+            "expected DuplicateTask, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_tile_with_different_task_types_is_still_accepted() {
+        let store = store(clock());
+        // two_tile_job already has the same tile with both Ortho and Overlay
+        let created = store
+            .create_job(two_tile_job())
+            .await
+            .expect("should accept different task types on same tile");
+        assert!(created.created);
+        assert_eq!(created.total_tasks, 2);
     }
 }

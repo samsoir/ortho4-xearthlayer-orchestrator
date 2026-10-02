@@ -11,6 +11,12 @@ pub enum TaskType {
     Overlay,
 }
 
+impl std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl TaskType {
     /// The canonical lowercase name, used as the database enum label.
     pub fn as_str(&self) -> &'static str {

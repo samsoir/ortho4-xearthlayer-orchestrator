@@ -1,6 +1,8 @@
 use thiserror::Error;
 
 use crate::ids::{JobId, TaskId};
+use crate::task::TaskType;
+use oxo_spec::TileId;
 
 /// Why a task store operation did not succeed.
 ///
@@ -37,6 +39,14 @@ pub enum TaskStoreError {
     )]
     JobConflict { region_code: String, revision: u32 },
 
+    /// The same tile and task type appeared twice in one job's task set.
+    /// Refused rather than deduplicated: collapsing it silently would make
+    /// the reported task count disagree with what was asked for, and would
+    /// make this adapter disagree with the PostgreSQL one, whose unique
+    /// constraint collapses it at the database.
+    #[error("task set contains {tile} {task_type} more than once")]
+    DuplicateTask { tile: TileId, task_type: TaskType },
+
     #[error("task store adapter failed: {0}")]
     Adapter(String),
 }
@@ -56,7 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_conflict_names_the_identity_that_collided() {
+    fn a_job_conflict_names_the_identity_that_collided() {
         let error = TaskStoreError::JobConflict {
             region_code: "NA".to_string(),
             revision: 2,
@@ -70,6 +80,7 @@ mod tests {
     fn every_variant_renders_something_an_operator_can_act_on() {
         let task_id = TaskId::generate();
         let job_id = crate::ids::JobId::generate();
+        let tile = oxo_spec::TileId::new(50, -2).expect("in range");
         let cases: Vec<(TaskStoreError, &str)> = vec![
             (TaskStoreError::LeaseLost { task_id }, "lease"),
             (TaskStoreError::UnknownJob { job_id }, "job"),
@@ -81,6 +92,13 @@ mod tests {
                     revision: 1,
                 },
                 "already exists",
+            ),
+            (
+                TaskStoreError::DuplicateTask {
+                    tile,
+                    task_type: TaskType::Ortho,
+                },
+                "more than once",
             ),
             (
                 TaskStoreError::Adapter("connection reset".to_string()),

@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_conflict_names_the_identity_that_collided() {
+    fn a_job_conflict_names_the_identity_that_collided() {
         let error = TaskStoreError::JobConflict {
             region_code: "NA".to_string(),
             revision: 2,
@@ -1021,6 +1021,43 @@ EOF
 - Consumes: `Clock`, every type from Task 2, the `TaskStore` trait.
 - Produces: `InMemoryTaskStore::new(clock: Arc<dyn Clock>)`, implementing `create_job`. Remaining methods are added by Tasks 5-7; until then they return `unimplemented!()` with a comment naming the task that fills them.
 
+**A refusal this task must add, found by review.** `CreateJob.tasks` is a
+`Vec<TaskSpec>` with no uniqueness invariant, and comparing both sides as a
+`BTreeSet` makes the conflict check blind to how often a `(tile, task_type)`
+pair appears. That is not merely untidy: for input `[A, A, B]` this adapter
+would store three task rows while the PostgreSQL adapter's
+`UNIQUE (job_id, tile, task_type)` with `ON CONFLICT DO NOTHING` stores two.
+The two adapters would diverge, in precisely the place Task 8's conformance
+suite exists to prevent divergence. A resubmission whose duplicate *count*
+changed but whose unique key set did not would also resume silently, which is
+the "running something other than what was asked" failure `JobConflict`
+exists to stop.
+
+So `create_job` **refuses a duplicated pair** rather than deduplicating it,
+following sub-project 1's precedent exactly: a specification naming a tile
+twice is an authoring mistake, rejected rather than silently collapsed,
+caught where it is cheapest to fix.
+
+Add this variant to `TaskStoreError` in `oxo-tasks/src/error.rs`, with
+`use oxo_spec::TileId;` and `use crate::task::TaskType;`:
+
+```rust
+    /// The same tile and task type appeared twice in one job's task set.
+    /// Refused rather than deduplicated: collapsing it silently would make
+    /// the reported task count disagree with what was asked for, and would
+    /// make this adapter disagree with the PostgreSQL one, whose unique
+    /// constraint collapses it at the database.
+    #[error("task set contains {tile} {task_type} more than once")]
+    DuplicateTask { tile: TileId, task_type: TaskType },
+```
+
+`TaskType` needs a `Display` impl for that message; add one delegating to
+`as_str` if it does not already have one, and say in your report which you
+did. Then extend Task 2's
+`every_variant_renders_something_an_operator_can_act_on` table with a row
+constructing a real `DuplicateTask` and expecting the fragment
+`"more than once"`.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `oxo-tasks/src/memory.rs`:
@@ -1065,7 +1102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_a_run_reports_what_it_created() {
+    async fn creating_a_job_reports_what_it_created() {
         let store = store(clock());
         let created = store.create_job(two_tile_job()).await.expect("create");
         assert!(created.created);
@@ -1073,7 +1110,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_the_same_run_again_resumes_rather_than_duplicating() {
+    async fn creating_the_same_job_again_resumes_rather_than_duplicating() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
         let second = store.create_job(two_tile_job()).await.expect("resume");
@@ -1130,7 +1167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_revisions_of_one_region_are_separate_runs() {
+    async fn two_revisions_of_one_region_are_separate_jobs() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
 
@@ -1237,6 +1274,19 @@ fn task_key(spec: &TaskSpec) -> (TileId, TaskType) {
 #[async_trait]
 impl TaskStore for InMemoryTaskStore {
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        // Refuse a duplicated pair before anything else. Deduplicating would
+        // make total_tasks disagree with the request, and would diverge from
+        // the PostgreSQL adapter, whose unique constraint collapses it.
+        let mut seen = BTreeSet::new();
+        for spec in &request.tasks {
+            if !seen.insert((spec.tile, spec.task_type)) {
+                return Err(TaskStoreError::DuplicateTask {
+                    tile: spec.tile,
+                    task_type: spec.task_type,
+                });
+            }
+        }
+
         let now = self.clock.now();
         let mut state = self.locked();
         let identity = (request.region_code.clone(), request.revision);
@@ -2046,7 +2096,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn an_abandoned_task_is_visible_while_work_continues_then_fails_the_run() {
+    async fn an_abandoned_task_is_visible_while_work_continues_then_fails_the_job() {
         let test_clock = clock();
         let store = store(test_clock.clone());
         let mut spec = two_tile_job();
@@ -2084,7 +2134,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn the_gate_rejects_a_run_it_does_not_know() {
+    async fn the_gate_rejects_a_job_it_does_not_know() {
         let store = store(clock());
         let error = store
             .job_status(JobId::generate())
@@ -2124,7 +2174,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn a_run_with_no_tasks_is_refused_rather_than_declared_complete() {
+    async fn a_job_with_no_tasks_is_refused_rather_than_declared_complete() {
         let store = store(clock());
         let mut empty = two_tile_job();
         empty.tasks.clear();
@@ -2477,7 +2527,7 @@ fn lease_of(task: &ClaimedTask) -> Lease {
 
 // ─── cases ───────────────────────────────────────────────────────────────
 
-pub async fn creating_a_run_twice_resumes_it(fixture: &dyn Fixture) {
+pub async fn creating_a_job_twice_resumes_it(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let first = subject.store.create_job(two_task_task()).await.expect("create");
     let second = subject.store.create_job(two_task_task()).await.expect("resume");
@@ -2506,7 +2556,7 @@ pub async fn a_changed_task_set_under_one_identity_conflicts(fixture: &dyn Fixtu
     );
 }
 
-pub async fn a_run_with_no_tasks_is_refused(fixture: &dyn Fixture) {
+pub async fn a_job_with_no_tasks_is_refused(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut empty = two_task_task();
     empty.tasks.clear();
@@ -2518,6 +2568,21 @@ pub async fn a_run_with_no_tasks_is_refused(fixture: &dyn Fixture) {
     assert!(
         matches!(error, TaskStoreError::EmptyJob { .. }),
         "expected EmptyJob, got {error:?}"
+    );
+}
+
+pub async fn a_job_with_a_duplicated_task_is_refused(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let mut doubled = two_task_job();
+    doubled.tasks.push(doubled.tasks[0].clone());
+    let error = subject
+        .store
+        .create_job(doubled)
+        .await
+        .expect_err("a duplicated task set must be refused, not deduplicated");
+    assert!(
+        matches!(error, TaskStoreError::DuplicateTask { .. }),
+        "expected DuplicateTask, got {error:?}"
     );
 }
 
@@ -2718,7 +2783,7 @@ pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) 
     );
 }
 
-pub async fn an_abandoned_task_is_visible_before_it_fails_the_run(fixture: &dyn Fixture) {
+pub async fn an_abandoned_task_is_visible_before_it_fails_the_job(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut spec = two_task_task();
     spec.max_attempts = 1;
@@ -2761,7 +2826,7 @@ pub async fn an_abandoned_task_is_visible_before_it_fails_the_run(fixture: &dyn 
     );
 }
 
-pub async fn an_unknown_run_is_refused_by_the_gate(fixture: &dyn Fixture) {
+pub async fn an_unknown_job_is_refused_by_the_gate(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let error = subject
         .store
@@ -2861,9 +2926,10 @@ Append to `oxo-tasks/src/conformance.rs`:
 #[macro_export]
 macro_rules! conformance_suite {
     ($fixture:expr) => {
-        $crate::conformance_case!($fixture, creating_a_run_twice_resumes_it);
+        $crate::conformance_case!($fixture, creating_a_job_twice_resumes_it);
         $crate::conformance_case!($fixture, a_changed_task_set_under_one_identity_conflicts);
-        $crate::conformance_case!($fixture, a_run_with_no_tasks_is_refused);
+        $crate::conformance_case!($fixture, a_job_with_no_tasks_is_refused);
+        $crate::conformance_case!($fixture, a_job_with_a_duplicated_task_is_refused);
         $crate::conformance_case!($fixture, every_task_is_handed_out_exactly_once);
         $crate::conformance_case!($fixture, an_empty_queue_yields_none_not_an_error);
         $crate::conformance_case!($fixture, a_task_type_filter_is_honoured);
@@ -2872,8 +2938,8 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start);
         $crate::conformance_case!($fixture, a_diligent_but_wedged_worker_is_cut_off_by_the_backstop);
         $crate::conformance_case!($fixture, the_gate_moves_from_in_progress_to_complete);
-        $crate::conformance_case!($fixture, an_abandoned_task_is_visible_before_it_fails_the_run);
-        $crate::conformance_case!($fixture, an_unknown_run_is_refused_by_the_gate);
+        $crate::conformance_case!($fixture, an_abandoned_task_is_visible_before_it_fails_the_job);
+        $crate::conformance_case!($fixture, an_unknown_job_is_refused_by_the_gate);
         $crate::conformance_case!($fixture, throughput_separates_pending_from_claimable_now);
         $crate::conformance_case!($fixture, concurrent_claims_hand_each_task_out_exactly_once);
     };
@@ -3391,6 +3457,16 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
 
 ```rust
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in &request.tasks {
+            if !seen.insert((spec.tile, spec.task_type)) {
+                return Err(TaskStoreError::DuplicateTask {
+                    tile: spec.tile,
+                    task_type: spec.task_type,
+                });
+            }
+        }
+
         if request.tasks.is_empty() {
             return Err(TaskStoreError::EmptyJob {
                 region_code: request.region_code,
@@ -3417,11 +3493,11 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         .await
         .map_err(adapter)?;
 
-        if let Some((run_uuid, existing_attempts, existing_backoff)) = existing {
-            let job_id = JobId::from_uuid(run_uuid);
+        if let Some((job_uuid, existing_attempts, existing_backoff)) = existing {
+            let job_id = JobId::from_uuid(job_uuid);
             let rows: Vec<(String, String)> =
                 sqlx::query_as("SELECT tile, task_type FROM tasks WHERE job_id = $1")
-                    .bind(run_uuid)
+                    .bind(job_uuid)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(adapter)?;
@@ -3454,12 +3530,12 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
             });
         }
 
-        let run_uuid = Uuid::new_v4();
+        let job_uuid = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(run_uuid)
+        .bind(job_uuid)
         .bind(&request.region_code)
         .bind(revision)
         .bind(max_attempts)
@@ -3476,7 +3552,7 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
                  ON CONFLICT (job_id, tile, task_type) DO NOTHING",
             )
             .bind(Uuid::new_v4())
-            .bind(run_uuid)
+            .bind(job_uuid)
             .bind(spec.tile.to_string())
             .bind(spec.task_type.as_str())
             .bind(now)
@@ -3486,7 +3562,7 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         }
 
         let total_tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE job_id = $1")
-            .bind(run_uuid)
+            .bind(job_uuid)
             .fetch_one(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -3494,7 +3570,7 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         tx.commit().await.map_err(adapter)?;
 
         Ok(JobCreated {
-            job_id: JobId::from_uuid(run_uuid),
+            job_id: JobId::from_uuid(job_uuid),
             created: true,
             total_tasks: u32::try_from(total_tasks).unwrap_or(u32::MAX),
         })
@@ -3540,13 +3616,13 @@ Replace the stub:
         .await
         .map_err(adapter)?;
 
-        let Some((task_uuid, run_uuid, tile, task_type, attempts)) = row else {
+        let Some((task_uuid, job_uuid, tile, task_type, attempts)) = row else {
             return Ok(None);
         };
 
         Ok(Some(ClaimedTask {
             task_id: TaskId::from_uuid(task_uuid),
-            job_id: JobId::from_uuid(run_uuid),
+            job_id: JobId::from_uuid(job_uuid),
             lease: token,
             tile: tile.parse().map_err(|error| {
                 TaskStoreError::Adapter(format!("stored tile {tile:?} is not a valid identifier: {error}"))
