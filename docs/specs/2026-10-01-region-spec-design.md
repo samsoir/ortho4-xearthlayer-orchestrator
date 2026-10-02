@@ -136,12 +136,17 @@ A pure function of the model. No filesystem, no network, no clock.
 - Provider code is syntactically well formed.
 - No raw key collides with a curated field.
 - Every raw key and value can be written into an Ortho4XP tile
-  configuration: no empty key, and no line break, `=` or control
-  character in a key, nor line break in a value. That file is one
-  setting per line parsed with `line.strip().split("=")`, so the write
-  side turns an embedded newline into an injected configuration line --
-  reproducing the silent-shadowing fault class the previous rule exists
-  to prevent.
+  configuration: no empty key, and no line break or `=` in either half,
+  nor control character in a key. Ortho4XP reads that file as
+  `dict(line.strip().split("=") for line in f if line.strip())`, which
+  constrains both halves. A **line break** means the write side turns one
+  override into two configuration lines, reproducing the
+  silent-shadowing fault class the previous rule exists to prevent. An
+  **`=`** is worse: `dict()` requires exactly two items per element and
+  `"foo=a=b".split("=")` gives three, so the call raises and the *whole*
+  config read fails -- which Ortho4XP reports as a bare `Crash!` with no
+  traceback, naming neither the override nor the file. Nothing keeps the
+  first split; that would need `split("=", 1)`.
 - Failure policy is coherent: at least one attempt, non-negative
   backoff.
 - The target location is a well-formed path.

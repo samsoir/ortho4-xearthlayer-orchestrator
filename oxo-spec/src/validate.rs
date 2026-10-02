@@ -241,14 +241,23 @@ pub(crate) fn validate_parameters(
 /// Check that every raw override can survive being written into an
 /// Ortho4XP tile configuration.
 ///
-/// That file is line-oriented and parsed with `line.strip().split("=")`
-/// (`src/O4_Config_Utils.py:1413`, also 1444 and 1477), so an embedded
-/// newline in either half becomes a second configuration line — which is
-/// how a value such as `"bar\ndefault_zl=18"` silently shadows
-/// `default_zl`, exactly the fault class the reserved-key rule exists to
-/// prevent. A `=` in a key makes the same `split("=")` misread the key, and
-/// Ortho4XP swallows the resulting exception into a bare `Crash!` with no
-/// traceback.
+/// Ortho4XP reads that file as
+/// `dict(line.strip().split("=") for line in f if line.strip())`
+/// (`src/O4_Config_Utils.py:1413`, identically at 1444 and 1477), which
+/// constrains both halves of every entry.
+///
+/// A **line break** in either half becomes a second configuration line, which
+/// is how a value such as `"bar\ndefault_zl=18"` silently shadows
+/// `default_zl` — exactly the fault class the reserved-key rule exists to
+/// prevent.
+///
+/// A **`=`** in either half is worse. `dict()` over an iterable of sequences
+/// requires each element to have exactly two items, and `"foo=a=b".split("=")`
+/// yields three, so the call raises `ValueError` and the *entire* config read
+/// fails. Per this project's recorded finding, Ortho4XP swallows that into a
+/// bare `Crash!` with no traceback, so the operator learns neither that a raw
+/// override was at fault nor which one. Nothing keeps the first split: that
+/// would need `split("=", 1)` or `str.partition`, and the code uses neither.
 ///
 /// This is a pure function of the model, so it is static validation and
 /// belongs here. Every offending entry is reported, not the first.
@@ -260,10 +269,10 @@ fn validate_raw_entries(raw: &BTreeMap<String, String>, errors: &mut Vec<Validat
                 reason,
             });
         }
-        if value.contains('\n') || value.contains('\r') {
+        if let Some(reason) = raw_value_fault(value) {
             errors.push(ValidationError::MalformedRawValue {
                 key: key.clone(),
-                reason: LINE_BREAK_REASON,
+                reason,
             });
         }
     }
@@ -276,7 +285,7 @@ fn raw_key_fault(key: &str) -> Option<&'static str> {
     } else if key.contains('\n') || key.contains('\r') {
         Some(LINE_BREAK_REASON)
     } else if key.contains('=') {
-        Some("Ortho4XP splits each configuration line on '=', so a key cannot contain one")
+        Some(EQUALS_REASON)
     } else if key.chars().any(char::is_control) {
         Some("a key cannot contain control characters")
     } else {
@@ -284,10 +293,31 @@ fn raw_key_fault(key: &str) -> Option<&'static str> {
     }
 }
 
-/// Shared because a newline fails for one reason in a key and a value.
+/// Why Ortho4XP could not be handed this raw value, or `None` if it can.
+///
+/// An empty value is legal — `"foo="` still splits into exactly two items —
+/// and a control character other than a line break survives the read, so
+/// neither is rejected here.
+fn raw_value_fault(value: &str) -> Option<&'static str> {
+    if value.contains('\n') || value.contains('\r') {
+        Some(LINE_BREAK_REASON)
+    } else if value.contains('=') {
+        Some(EQUALS_REASON)
+    } else {
+        None
+    }
+}
+
+/// Shared: a line break fails the same way on either side of the `=`.
 const LINE_BREAK_REASON: &str =
     "Ortho4XP's tile configuration is one setting per line, so a line break \
      would inject a second setting";
+
+/// Shared: a second `=` anywhere on the line fails the same way.
+const EQUALS_REASON: &str =
+    "Ortho4XP reads its tile configuration with dict(line.split(\"=\")), so a \
+     second '=' on the line makes the whole config read raise, which it \
+     reports only as Crash!";
 
 fn is_well_formed_provider_code(code: &str) -> bool {
     code.len() <= PROVIDER_CODE_MAX_LEN
@@ -786,10 +816,34 @@ mod tests {
     }
 
     #[test]
-    fn an_equals_sign_in_a_raw_value_is_accepted_because_ortho4xp_keeps_the_first_split() {
+    fn an_equals_sign_in_a_raw_value_is_a_fault_too() {
+        // Not a first-split-wins read: Ortho4XP builds a dict from
+        // `line.split("=")`, and `dict()` requires exactly two items per
+        // element, so a second `=` raises ValueError and the whole config
+        // read fails — reported to the operator only as `Crash!`.
         let mut errors = Vec::new();
         let mut p = parameters();
         p.raw.insert("custom_dem".to_string(), "a=b".to_string());
+        validate_parameters(&p, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::MalformedRawValue {
+                key: "custom_dem".to_string(),
+                reason: EQUALS_REASON,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_raw_value_with_no_equals_or_line_break_passes() {
+        let mut errors = Vec::new();
+        let mut p = parameters();
+        p.raw.insert(
+            "cover_airports_with_highres".to_string(),
+            "ICAO".to_string(),
+        );
+        // An empty value is legal: `"foo="` still splits into two items.
+        p.raw.insert("custom_dem".to_string(), String::new());
         validate_parameters(&p, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
     }
