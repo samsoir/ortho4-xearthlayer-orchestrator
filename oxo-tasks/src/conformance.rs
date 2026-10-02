@@ -18,6 +18,7 @@ use oxo_spec::TileId;
 
 use crate::clock::TestClock;
 use crate::error::TaskStoreError;
+use crate::quantity::{BackoffSeconds, MaxAttempts, TimeoutSeconds};
 use crate::request::{
     ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobStatus, Lease, ReapRequest,
     TaskSpec,
@@ -52,8 +53,8 @@ pub fn two_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
-        max_attempts: 3,
-        backoff: Duration::from_secs(60),
+        max_attempts: MaxAttempts::new(3).expect("non-zero"),
+        backoff: BackoffSeconds::new(60).expect("in range"),
         tasks: vec![
             TaskSpec {
                 tile: tile(50, -2),
@@ -76,8 +77,8 @@ pub fn one_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
-        max_attempts: 3,
-        backoff: Duration::from_secs(60),
+        max_attempts: MaxAttempts::new(3).expect("non-zero"),
+        backoff: BackoffSeconds::new(60).expect("in range"),
         tasks: vec![TaskSpec {
             tile: tile(50, -2),
             task_type: TaskType::Ortho,
@@ -303,8 +304,8 @@ pub async fn a_reclaimed_task_refuses_its_previous_holder(fixture: &dyn Fixture)
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(86_400),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(86_400).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -444,7 +445,7 @@ pub async fn concurrent_creation_of_one_job_happens_once(fixture: &dyn Fixture) 
 pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
-    job.max_attempts = 2;
+    job.max_attempts = MaxAttempts::new(2).expect("non-zero");
     subject.store.create_job(job).await.expect("create");
 
     let first = subject
@@ -580,7 +581,7 @@ pub async fn an_empty_task_type_filter_claims_nothing(fixture: &dyn Fixture) {
 pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
-    job.max_attempts = 1;
+    job.max_attempts = MaxAttempts::new(1).expect("non-zero");
     subject.store.create_job(job).await.expect("create");
 
     subject
@@ -594,8 +595,8 @@ pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &d
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(86_400),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(86_400).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -632,8 +633,8 @@ pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &d
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(120),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(120).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -669,7 +670,7 @@ pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) 
 pub async fn an_abandoned_task_is_visible_before_it_fails_the_job(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut spec = two_task_job();
-    spec.max_attempts = 1;
+    spec.max_attempts = MaxAttempts::new(1).expect("non-zero");
     let job = subject.store.create_job(spec).await.expect("create");
 
     let doomed = subject
