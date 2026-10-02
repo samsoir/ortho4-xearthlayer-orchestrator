@@ -12,14 +12,20 @@ Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.74):
 |---|---|
 | `oxo-spec` | Region specification model and static validation — sub-project 1. A **pure library**: no filesystem, no network, no clock. The model is in `oxo-spec/src/` (`tile.rs`, `metadata.rs`, `parameters.rs`, `policy.rs`, `target.rs`, `raw.rs`, `spec.rs`), every validation rule in `oxo-spec/src/validate.rs`. |
 | `oxo-spec-cli` | Thin CLI over that library, binary `oxo-spec`, subcommands `validate` and `show`. This is the component that reads files; the library never does. |
+| `oxo-tasks` | The job-server port — sub-project 2. Domain types, an eight-method `TaskStore` trait, an in-memory adapter (`memory.rs`), and a shared conformance suite (`conformance.rs`) behind the `conformance` feature that every adapter is held to. |
+| `oxo-tasks-postgres` | The PostgreSQL adapter for that port, held to the same conformance suite against a real database. |
 
 Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them):
 
-- `make verify` — format-check + clippy `-D warnings` + tests with `RUSTFLAGS="-D warnings"`. **Run this before every commit.**
+- `make verify` — format-check + clippy `-D warnings` (`--all-features`) + tests with `RUSTFLAGS="-D warnings"`. **Run this before every commit.**
 - `make pre-commit` — `verify`, required before pushing. Docs-only changes are exempt.
 - `make test` (all tests), `make lint` (clippy), `make format` / `make format-check`, `make build`, `make check`, `make coverage` (needs `cargo-llvm-cov`), `make clean`.
+- `make pg-up` / `make pg-down` — start/stop a disposable PostgreSQL in Podman for the adapter tests.
+- `make verify-db` — brings PostgreSQL up, runs the `oxo-tasks-postgres` conformance suite against it, then tears it down.
 
-81 Rust tests plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`) currently pass.
+**`verify` and `verify-db` are deliberately separate, and a newcomer must know why.** `test`/`test-strict`/`verify` exclude `oxo-tasks-postgres` **by package name** (`--exclude oxo-tasks-postgres`), not by a runtime skip. That means a green `make verify` proves nothing about the PostgreSQL adapter — it was never compiled into that run. Only `make verify-db` exercises it, against a real, disposable database. The exclusion is by name specifically so the gap is visible in which target you ran, rather than hidden behind tests that silently no-op without a `DATABASE_URL`.
+
+Currently passing: `make verify` runs 149 Rust tests (`oxo-spec`: 81 across its lib, CLI and `validation.rs` suites; `oxo-tasks`: 47 lib tests plus the 21-case conformance suite against the in-memory adapter) plus 8 Gherkin acceptance scenarios (`oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`). `make verify-db` runs 22 tests against PostgreSQL — the same 21 conformance cases plus a migration-idempotency test.
 
 Also note:
 
@@ -97,7 +103,7 @@ Matching the author's established convention across sibling projects:
 In place for the Rust workspace; apply them to anything added.
 
 - A `Makefile` fronts all development tasks, with `make verify` = `format-check + lint + test-strict`, and `make pre-commit` before every push. Docs-only changes are exempt from `pre-commit`. **Repository Status** above lists the full set of targets.
-- Minimum 80% test coverage, target 90%+. Currently **94.21% of lines and 92.41% of regions** (source-only, measured on `sub-project-1-region-spec`) over the 81 tests and 8 scenarios. Note that `make coverage` cannot be run in this environment — `cargo-llvm-cov` is not installed — so that figure comes from a measurement made elsewhere on this branch.
+- Minimum 80% test coverage, target 90%+. Currently **94.21% of lines and 92.41% of regions** (source-only, measured on `sub-project-1-region-spec`) over `oxo-spec`'s 81 tests and 8 scenarios — that figure is scoped to sub-project 1 only, not the whole workspace; `oxo-tasks` and `oxo-tasks-postgres` have not been separately measured. Note that `make coverage` cannot be run in this environment — `cargo-llvm-cov` is not installed — so that figure comes from a measurement made elsewhere on this branch.
 - Traits for abstraction plus dependency injection, so every component is testable in isolation with mocks.
 
 ## Related Repositories

@@ -174,19 +174,18 @@ already in flight, which matters when a job lasts weeks.
 jobs
   id            uuid primary key
   region_code   text        ─┐ unique together
-  revision      integer     ─┘
-  max_attempts  integer        snapshot of the spec's failure policy
+  revision      bigint      ─┘
+  max_attempts  bigint         snapshot of the spec's failure policy
   backoff_secs  bigint         snapshot
-  total_tasks    integer
   created_at    timestamptz
 
 tasks
   id                uuid primary key
   job_id            uuid references jobs
   tile              text           canonical TileId form
-  task_type          task_type       'ortho' | 'overlay'
-  state             task_state      'pending'|'claimed'|'succeeded'|'abandoned'
-  attempts          integer        starts, not failures
+  task_type         text           'ortho' | 'overlay', CHECK-constrained
+  state             text           'pending'|'claimed'|'succeeded'|'abandoned', CHECK-constrained
+  attempts          bigint         starts, not failures
   claimable_at      timestamptz    gates backoff
   lease_token       uuid           null unless claimed
   claimed_by        text           worker identity, null unless claimed
@@ -195,6 +194,16 @@ tasks
   last_failure      text           null until a failure is recorded
   unique (job_id, tile, task_type)
 ```
+
+`task_type` and `state` are `text` with a `CHECK` constraint rather than
+PostgreSQL enum types: a `sqlx` enum mapping requires `sqlx::Type` on the
+Rust enums, which would drag `sqlx` into `oxo-tasks` and break the
+dependency boundary the crate split (port vs. adapter) exists to
+maintain. `revision`, `max_attempts` and `attempts` are `bigint` rather
+than `integer` because the port carries `u32`/`u64` values that do not
+fit a signed 32-bit column. There is no `jobs.total_tasks` column; the
+adapter answers with `count(*) FROM tasks WHERE job_id = $1` instead, so
+there is nothing to keep in sync with the task set.
 
 A partial index on `(claimable_at, id) where state = 'pending'` serves
 the claim query; one on `(last_heartbeat_at) where state = 'claimed'`
@@ -205,17 +214,20 @@ serves the reaper. Both are the hot paths and nothing else is.
 ```sql
 UPDATE tasks SET
     state = 'claimed', lease_token = $1, claimed_by = $2,
-    claimed_at = $4, last_heartbeat_at = $4, attempts = attempts + 1
+    claimed_at = $3, last_heartbeat_at = $3, attempts = attempts + 1
 WHERE id = (
     SELECT id FROM tasks
-    WHERE state = 'pending' AND claimable_at <= $4
-      AND ($3::task_type[] IS NULL OR task_type = ANY($3))
+    WHERE state = 'pending' AND claimable_at <= $3
+      AND ($4::text[] IS NULL OR task_type = ANY($4))
     ORDER BY claimable_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
 RETURNING id, job_id, tile, task_type, attempts;
 ```
+
+(`$4::text[]`, not `$3::task_type[]` — `task_type` is `text` with a
+`CHECK`, not an enum type; see Schema above for why.)
 
 `FOR UPDATE SKIP LOCKED` is PostgreSQL's own documented idiom for
 handing one row to exactly one of many concurrent consumers. Ordering is
@@ -339,6 +351,71 @@ every task was handed out exactly once.
 - **The exact metric set behind `throughput`.** Sub-project 3 consumes it
   and sub-project 5 renders it; the shape should be settled with the
   first real consumer rather than guessed here.
+
+## Settled for sub-project 3, not open
+
+The final whole-branch review of this sub-project raised six questions that
+are answered here rather than left open. None is a defect in the shipped
+code, and none was reachable from this branch, because nothing here builds a
+`ReapRequest` or wires a specification's `backoff_seconds` into `CreateJob`.
+Sub-project 3 adds the configuration that reaches all of them, and should
+take these on before it does.
+
+- **Durations on the request surface become whole seconds, with one checked
+  constructor.** `CreateJob.backoff`, `ReapRequest.heartbeat_timeout` and
+  `ReapRequest.max_task_duration` are `std::time::Duration` today, and both
+  adapters convert them with
+  `chrono::Duration::from_std(…).unwrap_or(chrono::Duration::zero())`. That
+  inverts the caller's intent: the failure case yields **zero**, so an
+  enormous timeout becomes "reclaim every in-flight task on the next tick
+  and spend an attempt on each", and an enormous backoff becomes "retry
+  instantly". Replace all three with `u64` seconds behind a constructor that
+  refuses zero and anything unrepresentable. This removes all five
+  conversion sites, so the inversion cannot exist; puts the refusal in one
+  place, so the two adapters cannot disagree as they do now — PostgreSQL
+  refuses an unrepresentable backoff while the in-memory adapter silently
+  zeroes it; and matches both `oxo-spec`'s `backoff_seconds: u64` and the
+  `bigint` columns. The precision given up is precision no adapter ever
+  delivered: the PostgreSQL side already truncates with `.as_secs()`.
+- **Sub-second backoffs are a real divergence, and the same change closes
+  it.** Because `Duration` can express `60.5s`, the in-memory adapter stores
+  it exactly while PostgreSQL truncates to `60s`. Re-creating that job with a
+  `60.0s` backoff therefore yields `JobConflict` in memory and a silent
+  resume in PostgreSQL — an adapter resuming a job under a failure policy
+  other than the one asked for, which is precisely what `JobConflict` exists
+  to prevent.
+- **`max_attempts >= 1` belongs in the port; `revision >= 1` does not.**
+  `max_attempts = 0` is not merely a strict input, it is an inconsistent
+  state: `claim` still hands the task out, taking attempts from zero to one,
+  so a worker does hours of ortho production on a task whose budget was
+  already spent, and its only reachable outcomes are succeeded or abandoned.
+  It can succeed but can never retry. The same checked constructor refuses
+  it. `revision` is pure identity with no behavioural consequence, so its
+  bound stays in `oxo-spec`, and the schema's `CHECK (revision >= 0)` stays
+  exactly what its comment says it is — a guard on the `u32` to `i64` cast.
+- **The documented reclaim contract names the wrong variant.** `TaskStore`'s
+  doc comment says `heartbeat` returns `LeaseLost` when a task has been
+  reclaimed. Between the reap and the next claim the task is `Pending`, so
+  both adapters return `NotClaimed`; only after someone re-claims it does the
+  answer become `LeaseLost`. Both variants mean "you have lost this task,
+  stop working" and the documentation should say so. Two places in the tests
+  already work around this rather than settling it, which is the tell.
+- **`NotClaimed` is asserted by no conformance case.** Double-`complete` is
+  the likeliest duplicate call in production — a worker completes, the
+  response is lost, it retries — and it is covered for the in-memory adapter
+  only. Also uncovered across both adapters: the policy arm of `JobConflict`
+  (only the task-set arm is tested), two revisions being separate jobs,
+  order-insensitive task-set comparison, and first-in-first-out claim
+  ordering. The shipped behaviour is correct in each case; the gap is in the
+  argument, not the code.
+- **A job's identity cannot be recovered.** The port has no
+  `find_job(region_code, revision) -> Option<JobId>`, and both `job_status`
+  and `throughput` take only a `JobId`. After a control-plane restart the
+  only route back to a running job's identity is to call `create_job` again
+  with a byte-identical task set and read `created: false`, which means
+  re-running the planner over the whole region. The store loses no state, but
+  the caller loses the handle. Sub-project 3 needs this method, and adding it
+  here lets the conformance suite hold both adapters to it.
 
 ## Out of scope
 

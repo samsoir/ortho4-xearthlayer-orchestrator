@@ -103,6 +103,8 @@ oxo-spec = { path = "../oxo-spec" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+tokio = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 ```
@@ -172,13 +174,13 @@ mod tests {
         assert_eq!(id.to_string(), id.as_uuid().to_string());
     }
 
-    #[test]
-    fn identities_of_different_kinds_are_different_types() {
-        // A compile-time property, asserted by construction: this function
-        // would not compile if TaskId and JobId were the same type.
-        fn takes_task(_: TaskId) {}
-        takes_task(TaskId::generate());
-    }
+    // There is deliberately no test asserting that the three identities
+    // are distinct *types*. That is a compile-time property: the macro
+    // emits three separate nominal structs, so passing a TaskId where a
+    // JobId belongs does not compile, and `cargo build` already enforces
+    // it. A `#[test]` wrapping a call that merely compiles asserts
+    // nothing at runtime and can never fail — the same shape as three
+    // tests removed from Task 2 during this plan's pre-flight scan.
 }
 ```
 
@@ -304,6 +306,9 @@ macro_rules! identity {
     };
 }
 
+// Three separate invocations, so these are three distinct nominal
+// types: passing a TaskId where a JobId belongs will not compile.
+// Enforced by the type system, not by a test.
 identity!(JobId, "Identifies one job: one submission of one specification revision.");
 identity!(TaskId, "Identifies one task: one tile, one task type, within one job.");
 identity!(
@@ -402,6 +407,11 @@ mod tests {
             assert_eq!(TaskState::from_str_exact(state.as_str()), Some(state));
         }
         assert_eq!(TaskState::from_str_exact("running"), None);
+        // A case variant, specifically: this is the assertion that would
+        // catch an accidental `.to_lowercase()` creeping into the parse.
+        // TaskType's round-trip test pins the same rule; without this line
+        // TaskState's exact-match guarantee is unasserted.
+        assert_eq!(TaskState::from_str_exact("PENDING"), None);
     }
 }
 ```
@@ -424,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_conflict_names_the_identity_that_collided() {
+    fn a_job_conflict_names_the_identity_that_collided() {
         let error = TaskStoreError::JobConflict {
             region_code: "NA".to_string(),
             revision: 2,
@@ -501,44 +511,23 @@ mod tests {
         assert_ne!(request.tasks[0].task_type, request.tasks[1].task_type);
     }
 
-    #[test]
-    fn a_claim_request_with_no_filter_means_any_task_type() {
-        let request = ClaimRequest {
-            worker: "pod-1".to_string(),
-            task_types: None,
-        };
-        assert!(request.task_types.is_none());
-    }
-
-    #[test]
-    fn a_fail_outcome_distinguishes_requeued_from_abandoned() {
-        let requeued = FailOutcome::Requeued {
-            claimable_at: chrono::Utc::now(),
-            attempts_remaining: 2,
-        };
-        let abandoned = FailOutcome::Abandoned;
-        assert_ne!(
-            std::mem::discriminant(&requeued),
-            std::mem::discriminant(&abandoned)
-        );
-    }
-
-    #[test]
-    fn a_job_status_distinguishes_its_three_shapes() {
-        let complete = JobStatus::Complete;
-        let failed = JobStatus::Failed { abandoned: 1 };
-        let in_progress = JobStatus::InProgress {
-            pending: 1,
-            claimed: 0,
-            succeeded: 0,
-            abandoned: 0,
-        };
-        assert_ne!(complete, failed);
-        assert_ne!(failed, in_progress);
-        assert_ne!(complete, in_progress);
-    }
+    // Only one test here, and deliberately so. These are plain data
+    // definitions, so the red-green driver is compilation: before the types
+    // exist this module does not compile, and after they do it does. Three
+    // further tests were drafted and removed during the pre-flight scan —
+    // two asserted that distinct enum variants differ, which can never
+    // fail, one asserted that a field just set to `None` is `None`, and one
+    // of them called `Utc::now()` directly, which the Global Constraints
+    // forbid. Behavioural coverage of every one of these types arrives in
+    // Tasks 4 through 8, which assert concrete values such as
+    // `FailOutcome::Abandoned` and `JobStatus::Complete`.
 }
 ```
+
+**This task's RED is a compile failure, not an assertion failure.** That is
+legitimate for pure data definitions: the test module cannot compile until
+the types exist. Say so plainly in your report and paste the compiler error
+— do not invent an assertion that fails for show.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -574,6 +563,14 @@ impl TaskType {
 
     /// Parse the canonical form. Exact match only — no case folding, so a
     /// database label and this enum cannot drift apart silently.
+    ///
+    /// The reason these string forms exist at all: the PostgreSQL schema
+    /// stores task type and state as `text` with a `CHECK` constraint rather
+    /// than as PostgreSQL enums. A PostgreSQL enum would require
+    /// `#[derive(sqlx::Type)]` on this enum, which would pull `sqlx` into
+    /// `oxo-tasks` and break the crate split that lets a consumer depend on
+    /// the port without a database driver. Do not "improve" this to a
+    /// PostgreSQL enum without reading that decision first.
     pub fn from_str_exact(text: &str) -> Option<Self> {
         match text {
             "ortho" => Some(Self::Ortho),
@@ -920,8 +917,8 @@ use async_trait::async_trait;
 use crate::error::TaskStoreError;
 use crate::ids::JobId;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, Lease, ReapOutcome, ReapRequest,
-    JobCreated, JobStatus, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
+    ReapOutcome, ReapRequest, Throughput,
 };
 
 /// Durable task state, leasing, retry accounting and the completion gate.
@@ -1026,6 +1023,43 @@ EOF
 - Consumes: `Clock`, every type from Task 2, the `TaskStore` trait.
 - Produces: `InMemoryTaskStore::new(clock: Arc<dyn Clock>)`, implementing `create_job`. Remaining methods are added by Tasks 5-7; until then they return `unimplemented!()` with a comment naming the task that fills them.
 
+**A refusal this task must add, found by review.** `CreateJob.tasks` is a
+`Vec<TaskSpec>` with no uniqueness invariant, and comparing both sides as a
+`BTreeSet` makes the conflict check blind to how often a `(tile, task_type)`
+pair appears. That is not merely untidy: for input `[A, A, B]` this adapter
+would store three task rows while the PostgreSQL adapter's
+`UNIQUE (job_id, tile, task_type)` with `ON CONFLICT DO NOTHING` stores two.
+The two adapters would diverge, in precisely the place Task 8's conformance
+suite exists to prevent divergence. A resubmission whose duplicate *count*
+changed but whose unique key set did not would also resume silently, which is
+the "running something other than what was asked" failure `JobConflict`
+exists to stop.
+
+So `create_job` **refuses a duplicated pair** rather than deduplicating it,
+following sub-project 1's precedent exactly: a specification naming a tile
+twice is an authoring mistake, rejected rather than silently collapsed,
+caught where it is cheapest to fix.
+
+Add this variant to `TaskStoreError` in `oxo-tasks/src/error.rs`, with
+`use oxo_spec::TileId;` and `use crate::task::TaskType;`:
+
+```rust
+    /// The same tile and task type appeared twice in one job's task set.
+    /// Refused rather than deduplicated: collapsing it silently would make
+    /// the reported task count disagree with what was asked for, and would
+    /// make this adapter disagree with the PostgreSQL one, whose unique
+    /// constraint collapses it at the database.
+    #[error("task set contains {tile} {task_type} more than once")]
+    DuplicateTask { tile: TileId, task_type: TaskType },
+```
+
+`TaskType` needs a `Display` impl for that message; add one delegating to
+`as_str` if it does not already have one, and say in your report which you
+did. Then extend Task 2's
+`every_variant_renders_something_an_operator_can_act_on` table with a row
+constructing a real `DuplicateTask` and expecting the fragment
+`"more than once"`.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `oxo-tasks/src/memory.rs`:
@@ -1069,8 +1103,28 @@ mod tests {
         }
     }
 
+    /// A job with exactly one task, for tests about a single task's whole
+    /// lifecycle.
+    ///
+    /// `two_tile_job` has two, and claim order is FIFO by `claimable_at` — so
+    /// once a task has failed and been requeued to `now + backoff`, it sorts
+    /// *after* a sibling that has never been claimed. A loop that claims "the
+    /// next task" then gets the sibling, not the task under test.
+    pub(crate) fn one_task_job() -> CreateJob {
+        CreateJob {
+            region_code: "NA".to_string(),
+            revision: 1,
+            max_attempts: 3,
+            backoff: Duration::from_secs(60),
+            tasks: vec![TaskSpec {
+                tile: tile(50, -2),
+                task_type: TaskType::Ortho,
+            }],
+        }
+    }
+
     #[tokio::test]
-    async fn creating_a_run_reports_what_it_created() {
+    async fn creating_a_job_reports_what_it_created() {
         let store = store(clock());
         let created = store.create_job(two_tile_job()).await.expect("create");
         assert!(created.created);
@@ -1078,7 +1132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creating_the_same_run_again_resumes_rather_than_duplicating() {
+    async fn creating_the_same_job_again_resumes_rather_than_duplicating() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
         let second = store.create_job(two_tile_job()).await.expect("resume");
@@ -1135,7 +1189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_revisions_of_one_region_are_separate_runs() {
+    async fn two_revisions_of_one_region_are_separate_jobs() {
         let store = store(clock());
         let first = store.create_job(two_tile_job()).await.expect("create");
 
@@ -1242,6 +1296,19 @@ fn task_key(spec: &TaskSpec) -> (TileId, TaskType) {
 #[async_trait]
 impl TaskStore for InMemoryTaskStore {
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        // Refuse a duplicated pair before anything else. Deduplicating would
+        // make total_tasks disagree with the request, and would diverge from
+        // the PostgreSQL adapter, whose unique constraint collapses it.
+        let mut seen = BTreeSet::new();
+        for spec in &request.tasks {
+            if !seen.insert((spec.tile, spec.task_type)) {
+                return Err(TaskStoreError::DuplicateTask {
+                    tile: spec.tile,
+                    task_type: spec.task_type,
+                });
+            }
+        }
+
         let now = self.clock.now();
         let mut state = self.locked();
         let identity = (request.region_code.clone(), request.revision);
@@ -1748,7 +1815,10 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     async fn a_task_is_abandoned_on_the_last_permitted_start() {
         let test_clock = clock();
         let store = store(test_clock.clone());
-        store.create_job(two_tile_job()).await.unwrap();
+        // One task, not two: this test follows a single task through its whole
+        // attempt budget, and with two tasks the FIFO order would hand out the
+        // never-claimed sibling on the second claim.
+        store.create_job(one_task_job()).await.unwrap();
 
         // max_attempts is 3, so the third failure abandons.
         for expected_remaining in [2u32, 1] {
@@ -2051,7 +2121,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn an_abandoned_task_is_visible_while_work_continues_then_fails_the_run() {
+    async fn an_abandoned_task_is_visible_while_work_continues_then_fails_the_job() {
         let test_clock = clock();
         let store = store(test_clock.clone());
         let mut spec = two_tile_job();
@@ -2089,7 +2159,7 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn the_gate_rejects_a_run_it_does_not_know() {
+    async fn the_gate_rejects_a_job_it_does_not_know() {
         let store = store(clock());
         let error = store
             .job_status(JobId::generate())
@@ -2129,11 +2199,11 @@ Add to the test module in `oxo-tasks/src/memory.rs`:
     }
 
     #[tokio::test]
-    async fn a_run_with_no_tasks_is_refused_rather_than_declared_complete() {
+    async fn a_job_with_no_tasks_is_refused_rather_than_declared_complete() {
         let store = store(clock());
         let mut empty = two_tile_job();
         empty.tasks.clear();
-        let error = store.create_job(empty).await.expect_err("empty run");
+        let error = store.create_job(empty).await.expect_err("an empty job is refused");
         assert!(
             matches!(error, TaskStoreError::EmptyJob { .. }),
             "expected EmptyJob, got {error:?}"
@@ -2237,7 +2307,7 @@ Then replace the three stubs:
         let policies: BTreeMap<JobId, (u32, Duration)> = state
             .jobs
             .iter()
-            .map(|(id, run)| (*id, (job.max_attempts, job.backoff)))
+            .map(|(id, job)| (*id, (job.max_attempts, job.backoff)))
             .collect();
 
         let expired: Vec<TaskId> = state
@@ -2365,6 +2435,7 @@ EOF
 - Create: `oxo-tasks/tests/conformance_memory.rs`
 - Modify: `oxo-tasks/src/lib.rs`
 - Modify: `oxo-tasks/Cargo.toml`
+- Modify: `Makefile` (the `test` and `test-strict` targets, Step 5)
 
 **Interfaces:**
 - Produces: a `conformance` feature; `Subject { store, clock }`; the `Fixture` trait with `async fn fresh(&self) -> Subject`; one `pub async fn` per invariant; and the `conformance_suite!` macro, which expands to one `#[tokio::test]` per case.
@@ -2380,7 +2451,7 @@ Modify `oxo-tasks/Cargo.toml`:
 [features]
 # Exposes the conformance suite so another crate's adapter can be held to
 # the same contract. Off by default: it is test scaffolding, not API.
-conformance = []
+conformance = ["tokio"]
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -2447,7 +2518,7 @@ fn tile(lat: i8, lon: i16) -> TileId {
 }
 
 /// Two tasks for one tile: the ortho build and its overlay.
-pub fn two_task_task() -> CreateJob {
+pub fn two_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
@@ -2463,6 +2534,24 @@ pub fn two_task_task() -> CreateJob {
                 task_type: TaskType::Overlay,
             },
         ],
+    }
+}
+
+/// One task, for a case that follows a single task through its whole life.
+///
+/// A two-task job derails such a case: claims come out oldest-claimable
+/// first, so a requeued task sorts *behind* its never-claimed sibling and
+/// the next claim hands back the sibling instead.
+pub fn one_task_job() -> CreateJob {
+    CreateJob {
+        region_code: "NA".to_string(),
+        revision: 1,
+        max_attempts: 3,
+        backoff: Duration::from_secs(60),
+        tasks: vec![TaskSpec {
+            tile: tile(50, -2),
+            task_type: TaskType::Ortho,
+        }],
     }
 }
 
@@ -2482,10 +2571,10 @@ fn lease_of(task: &ClaimedTask) -> Lease {
 
 // ─── cases ───────────────────────────────────────────────────────────────
 
-pub async fn creating_a_run_twice_resumes_it(fixture: &dyn Fixture) {
+pub async fn creating_a_job_twice_resumes_it(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let first = subject.store.create_job(two_task_task()).await.expect("create");
-    let second = subject.store.create_job(two_task_task()).await.expect("resume");
+    let first = subject.store.create_job(two_task_job()).await.expect("create");
+    let second = subject.store.create_job(two_task_job()).await.expect("resume");
     assert!(first.created);
     assert!(!second.created);
     assert_eq!(first.job_id, second.job_id);
@@ -2494,8 +2583,8 @@ pub async fn creating_a_run_twice_resumes_it(fixture: &dyn Fixture) {
 
 pub async fn a_changed_task_set_under_one_identity_conflicts(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
-    let mut altered = two_task_task();
+    subject.store.create_job(two_task_job()).await.expect("create");
+    let mut altered = two_task_job();
     altered.tasks.push(TaskSpec {
         tile: tile(51, -2),
         task_type: TaskType::Ortho,
@@ -2511,9 +2600,9 @@ pub async fn a_changed_task_set_under_one_identity_conflicts(fixture: &dyn Fixtu
     );
 }
 
-pub async fn a_run_with_no_tasks_is_refused(fixture: &dyn Fixture) {
+pub async fn a_job_with_no_tasks_is_refused(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut empty = two_task_task();
+    let mut empty = two_task_job();
     empty.tasks.clear();
     let error = subject
         .store
@@ -2526,9 +2615,24 @@ pub async fn a_run_with_no_tasks_is_refused(fixture: &dyn Fixture) {
     );
 }
 
+pub async fn a_job_with_a_duplicated_task_is_refused(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let mut doubled = two_task_job();
+    doubled.tasks.push(doubled.tasks[0].clone());
+    let error = subject
+        .store
+        .create_job(doubled)
+        .await
+        .expect_err("a duplicated task set must be refused, not deduplicated");
+    assert!(
+        matches!(error, TaskStoreError::DuplicateTask { .. }),
+        "expected DuplicateTask, got {error:?}"
+    );
+}
+
 pub async fn every_task_is_handed_out_exactly_once(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
 
     let mut seen = Vec::new();
     while let Some(task) = subject
@@ -2561,7 +2665,7 @@ pub async fn an_empty_queue_yields_none_not_an_error(fixture: &dyn Fixture) {
 
 pub async fn a_task_type_filter_is_honoured(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let claimed = subject
         .store
         .claim(ClaimRequest {
@@ -2576,7 +2680,7 @@ pub async fn a_task_type_filter_is_honoured(fixture: &dyn Fixture) {
 
 pub async fn a_stale_lease_is_refused_by_every_reporting_call(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2607,9 +2711,115 @@ pub async fn a_stale_lease_is_refused_by_every_reporting_call(fixture: &dyn Fixt
     }
 }
 
+/// The token a reclaimed worker still holds must be refused.
+///
+/// This is the at-most-once guarantee, and the case above cannot test it: a
+/// freshly generated token is refused by an adapter that compares tokens
+/// properly AND by one that stores no token at all. Only the *genuine
+/// previous* token separates them. Get this wrong and two workers both
+/// believe they own the task, so one silently clobbers the other's report.
+pub async fn a_reclaimed_task_refuses_its_previous_holder(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    // One task, so the re-claim below cannot hand back a sibling.
+    subject.store.create_job(one_task_job()).await.expect("create");
+
+    let first = subject
+        .store
+        .claim(any_task("pod-a"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let abandoned = lease_of(&first);
+
+    // The worker goes silent and the reaper takes the task back.
+    subject.clock.advance(Duration::from_secs(120));
+    let reaped = subject
+        .store
+        .reap_expired(ReapRequest {
+            heartbeat_timeout: Duration::from_secs(90),
+            max_task_duration: Duration::from_secs(86_400),
+        })
+        .await
+        .expect("reap");
+    assert_eq!(reaped.requeued, 1, "the silent worker's task is reclaimed");
+
+    // A reaped task takes backoff, so wait it out, then let a second worker
+    // take it. That worker now holds the only valid token.
+    subject.clock.advance(Duration::from_secs(60));
+    let second = subject
+        .store
+        .claim(any_task("pod-b"))
+        .await
+        .expect("claim")
+        .expect("the reclaimed task is handed out again");
+    assert_eq!(second.task_id, first.task_id, "the same task came back");
+    assert_ne!(
+        second.lease, first.lease,
+        "a re-claim must mint a fresh token, or the old holder still has a live lease"
+    );
+
+    // The original holder is refused by all three reporting calls.
+    for error in [
+        subject.store.heartbeat(abandoned).await.expect_err("heartbeat"),
+        subject.store.complete(abandoned).await.expect_err("complete"),
+        subject
+            .store
+            .fail(FailRequest {
+                lease: abandoned,
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect_err("fail"),
+    ] {
+        assert!(
+            matches!(error, TaskStoreError::LeaseLost { .. }),
+            "the previous holder must be told its lease is lost, got {error:?}"
+        );
+    }
+
+    // And the current holder is unaffected by that noise.
+    subject
+        .store
+        .complete(lease_of(&second))
+        .await
+        .expect("the current holder can still report");
+}
+
+/// All three reporting calls agree on what an unknown task is.
+///
+/// An adapter that reports on a task with a single conditional write —
+/// `WHERE id = $1 AND token = $2` — cannot tell "no such task" from "wrong
+/// token" and will answer `LeaseLost` for both. Callers distinguish them:
+/// one is a lost race to retry past, the other is a bug or a wiped store.
+pub async fn an_unknown_task_is_refused_by_every_reporting_call(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let nowhere = Lease {
+        task_id: crate::ids::TaskId::generate(),
+        token: crate::ids::LeaseToken::generate(),
+    };
+
+    for error in [
+        subject.store.heartbeat(nowhere).await.expect_err("heartbeat"),
+        subject.store.complete(nowhere).await.expect_err("complete"),
+        subject
+            .store
+            .fail(FailRequest {
+                lease: nowhere,
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect_err("fail"),
+    ] {
+        assert!(
+            matches!(error, TaskStoreError::UnknownTask { .. }),
+            "expected UnknownTask, got {error:?}"
+        );
+    }
+}
+
 pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.max_attempts = 2;
     subject.store.create_job(job).await.expect("create");
 
@@ -2657,7 +2867,7 @@ pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixtu
 
 pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.max_attempts = 1;
     subject.store.create_job(job).await.expect("create");
 
@@ -2681,7 +2891,7 @@ pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &d
 
 pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    subject.store.create_job(two_task_task()).await.expect("create");
+    subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2707,7 +2917,7 @@ pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &d
 
 pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let job = subject.store.create_job(two_task_task()).await.expect("create");
+    let job = subject.store.create_job(two_task_job()).await.expect("create");
     assert!(matches!(
         subject.store.job_status(job.job_id).await.expect("status"),
         JobStatus::InProgress { pending: 2, .. }
@@ -2723,9 +2933,9 @@ pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) 
     );
 }
 
-pub async fn an_abandoned_task_is_visible_before_it_fails_the_run(fixture: &dyn Fixture) {
+pub async fn an_abandoned_task_is_visible_before_it_fails_the_job(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut spec = two_task_task();
+    let mut spec = two_task_job();
     spec.max_attempts = 1;
     let job = subject.store.create_job(spec).await.expect("create");
 
@@ -2766,7 +2976,7 @@ pub async fn an_abandoned_task_is_visible_before_it_fails_the_run(fixture: &dyn 
     );
 }
 
-pub async fn an_unknown_run_is_refused_by_the_gate(fixture: &dyn Fixture) {
+pub async fn an_unknown_job_is_refused_by_the_gate(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let error = subject
         .store
@@ -2781,7 +2991,7 @@ pub async fn an_unknown_run_is_refused_by_the_gate(fixture: &dyn Fixture) {
 
 pub async fn throughput_separates_pending_from_claimable_now(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let job = subject.store.create_job(two_task_task()).await.expect("create");
+    let job = subject.store.create_job(two_task_job()).await.expect("create");
     let task = subject
         .store
         .claim(any_task("pod"))
@@ -2810,7 +3020,7 @@ pub async fn throughput_separates_pending_from_claimable_now(fixture: &dyn Fixtu
 /// claimants must between them see each task exactly once.
 pub async fn concurrent_claims_hand_each_task_out_exactly_once(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
-    let mut job = two_task_task();
+    let mut job = two_task_job();
     job.tasks = (0..24)
         .map(|n| TaskSpec {
             tile: tile(50, -24 + n),
@@ -2866,19 +3076,22 @@ Append to `oxo-tasks/src/conformance.rs`:
 #[macro_export]
 macro_rules! conformance_suite {
     ($fixture:expr) => {
-        $crate::conformance_case!($fixture, creating_a_run_twice_resumes_it);
+        $crate::conformance_case!($fixture, creating_a_job_twice_resumes_it);
         $crate::conformance_case!($fixture, a_changed_task_set_under_one_identity_conflicts);
-        $crate::conformance_case!($fixture, a_run_with_no_tasks_is_refused);
+        $crate::conformance_case!($fixture, a_job_with_no_tasks_is_refused);
+        $crate::conformance_case!($fixture, a_job_with_a_duplicated_task_is_refused);
         $crate::conformance_case!($fixture, every_task_is_handed_out_exactly_once);
         $crate::conformance_case!($fixture, an_empty_queue_yields_none_not_an_error);
         $crate::conformance_case!($fixture, a_task_type_filter_is_honoured);
         $crate::conformance_case!($fixture, a_stale_lease_is_refused_by_every_reporting_call);
+        $crate::conformance_case!($fixture, a_reclaimed_task_refuses_its_previous_holder);
+        $crate::conformance_case!($fixture, an_unknown_task_is_refused_by_every_reporting_call);
         $crate::conformance_case!($fixture, a_failure_is_requeued_until_the_budget_is_spent);
         $crate::conformance_case!($fixture, a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start);
         $crate::conformance_case!($fixture, a_diligent_but_wedged_worker_is_cut_off_by_the_backstop);
         $crate::conformance_case!($fixture, the_gate_moves_from_in_progress_to_complete);
-        $crate::conformance_case!($fixture, an_abandoned_task_is_visible_before_it_fails_the_run);
-        $crate::conformance_case!($fixture, an_unknown_run_is_refused_by_the_gate);
+        $crate::conformance_case!($fixture, an_abandoned_task_is_visible_before_it_fails_the_job);
+        $crate::conformance_case!($fixture, an_unknown_job_is_refused_by_the_gate);
         $crate::conformance_case!($fixture, throughput_separates_pending_from_claimable_now);
         $crate::conformance_case!($fixture, concurrent_claims_hand_each_task_out_exactly_once);
     };
@@ -2970,11 +3183,12 @@ git add oxo-tasks/ Makefile
 git commit -F - <<'EOF'
 test(tasks): add the conformance suite both adapters must satisfy
 
-Fifteen cases asserting invariants rather than implementation: a task is
-handed out exactly once, a stale lease is refused by every reporting
-call, a reap spends a start, a wedged worker is cut off by the backstop,
-the gate moves through its three shapes, and concurrent claimants between
-them see each task exactly once.
+Eighteen cases asserting invariants rather than implementation: a task is
+handed out exactly once, a stale lease is refused by every reporting call,
+a reclaimed task refuses the token its previous holder still has, all three
+reporting calls agree on what an unknown task is, a reap spends a start, a
+wedged worker is cut off by the backstop, the gate moves through its three
+shapes, and concurrent claimants between them see each task exactly once.
 
 The case list lives in one macro, so adding a case covers every adapter
 without touching their crates, while each case still gets its own test
@@ -3069,7 +3283,7 @@ pg-up: ## Start a disposable PostgreSQL for the adapter tests
 	for i in $$(seq 1 60); do \
 	  if podman exec $(PG_TEST_CONTAINER) pg_isready -q -U postgres 2>/dev/null; then echo ' ready'; exit 0; fi; \
 	  printf '.'; sleep 1; \
-	done; echo ' timed out'; exit 1
+	done; echo ' timed out'; podman rm -f $(PG_TEST_CONTAINER) >/dev/null 2>&1 || true; exit 1
 
 .PHONY: pg-down
 pg-down: ## Remove the disposable PostgreSQL
@@ -3101,10 +3315,19 @@ Create `oxo-tasks-postgres/migrations/0001_tasks.sql`:
 CREATE TABLE jobs (
     id           uuid        PRIMARY KEY,
     region_code  text        NOT NULL,
-    revision     integer     NOT NULL,
+    -- bigint, not integer: the port's revision is a u32, which does not fit
+    -- in a signed 32-bit column. Widening it means the conversion is
+    -- infallible, so no value the in-memory adapter accepts can be narrowed,
+    -- saturated or wrapped on the way in here. The CHECK guards
+    -- representability only -- a negative value could arrive solely from a
+    -- coding error. The meaningful lower bounds (revision >= 1,
+    -- max_attempts >= 1) live in oxo-spec's validation, which is the layer
+    -- that knows what these numbers mean; if the port ever adopts them, both
+    -- adapters and a conformance case should take them on together.
+    revision     bigint      NOT NULL CHECK (revision >= 0),
     -- Snapshotted from the specification's failure policy, so editing a
     -- specification cannot change the policy of a job already in flight.
-    max_attempts integer     NOT NULL CHECK (max_attempts >= 1),
+    max_attempts bigint      NOT NULL CHECK (max_attempts >= 0),
     backoff_secs bigint      NOT NULL CHECK (backoff_secs >= 0),
     created_at   timestamptz NOT NULL,
     UNIQUE (region_code, revision)
@@ -3117,7 +3340,7 @@ CREATE TABLE tasks (
     task_type          text        NOT NULL CHECK (task_type IN ('ortho', 'overlay')),
     state             text        NOT NULL CHECK (state IN ('pending', 'claimed', 'succeeded', 'abandoned')),
     -- Counts starts, not failures: incremented at claim.
-    attempts          integer     NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    attempts          bigint      NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     claimable_at      timestamptz NOT NULL,
     lease_token       uuid,
     claimed_by        text,
@@ -3129,6 +3352,7 @@ CREATE TABLE tasks (
     CONSTRAINT lease_matches_state CHECK (
         (state = 'claimed') = (lease_token IS NOT NULL)
         AND (state = 'claimed') = (claimed_at IS NOT NULL)
+        AND (state = 'claimed') = (last_heartbeat_at IS NOT NULL)
     )
 );
 
@@ -3165,8 +3389,8 @@ use oxo_tasks::clock::Clock;
 use oxo_tasks::error::TaskStoreError;
 use oxo_tasks::ids::JobId;
 use oxo_tasks::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, Lease, ReapOutcome, ReapRequest,
-    JobCreated, JobStatus, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
+    ReapOutcome, ReapRequest, Throughput,
 };
 use oxo_tasks::store::TaskStore;
 use sqlx::PgPool;
@@ -3178,7 +3402,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 /// A task store backed by PostgreSQL.
+///
+/// The fields are unread until Task 10 fills the first port methods, and
+/// `make lint` runs clippy with `-D warnings` over the whole workspace, so
+/// the allow is load-bearing until then. It mirrors the same allow on the
+/// in-memory adapter's `Task` struct.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct PostgresTaskStore {
     pool: PgPool,
     clock: Arc<dyn Clock>,
@@ -3192,6 +3422,9 @@ impl PostgresTaskStore {
 
 /// Adapter failures become `TaskStoreError::Adapter`, which is the only
 /// variant a caller may consider retrying.
+///
+/// Unused until Task 10, for the same reason the struct carries an allow.
+#[allow(dead_code)]
 fn adapter(error: sqlx::Error) -> TaskStoreError {
     TaskStoreError::Adapter(error.to_string())
 }
@@ -3270,7 +3503,7 @@ async fn the_schema_applies_and_is_idempotent() {
             .fetch_all(&pool)
             .await
             .expect("list tables");
-    assert!(tables.iter().any(|t| t == "runs"), "{tables:?}");
+    assert!(tables.iter().any(|t| t == "jobs"), "{tables:?}");
     assert!(tables.iter().any(|t| t == "tasks"), "{tables:?}");
 }
 ```
@@ -3278,7 +3511,9 @@ async fn the_schema_applies_and_is_idempotent() {
 - [ ] **Step 6: Run it and verify it fails for the right reason**
 
 Run: `make verify-db`
-Expected: the container starts, then FAIL — the migration directory is read but the crate does not compile, or the assertion fails because the schema is absent. Capture the real output. Then make it pass by correcting whatever the failure names.
+Expected: the container starts, then FAIL — the migration directory is read but the crate does not compile, or the assertion fails because the schema is absent. Capture the real output.
+
+Then make it pass. The table names are `jobs` and `tasks`, fixed by the schema above and relied on by every query in Tasks 10-12: if the failure names a table, correct the *test*, never the schema.
 
 Run: `make verify`
 Expected: PASS, and it must **not** attempt the database tests. Confirm by reading the output: no `conformance_postgres` target should appear.
@@ -3313,6 +3548,7 @@ EOF
 **Files:**
 - Modify: `oxo-tasks-postgres/src/lib.rs`
 - Modify: `oxo-tasks-postgres/tests/conformance_postgres.rs`
+- Modify: `oxo-tasks-postgres/migrations/0001_tasks.sql` — `revision`, `max_attempts` and `attempts` become `bigint`, and their CHECKs become `>= 0`. Task 9 shipped them as `integer`, which cannot hold the `u32` the port actually carries. Edit the migration in place: no database outside the disposable container has ever applied it. The conversions in this task depend on the wider columns, so the two changes land together.
 
 **Interfaces:**
 - Produces: `create_job` and `claim` replacing their stubs, with behaviour identical to the in-memory adapter.
@@ -3344,7 +3580,16 @@ impl Fixture for Postgres {
     async fn fresh(&self) -> Subject {
         let schema = format!("conf_{}", Uuid::new_v4().simple());
 
-        let admin = pool().await;
+        // One connection, not the shared pool's eight: this only issues a
+        // CREATE SCHEMA, and nineteen cases running concurrently would
+        // otherwise open well over a hundred connections between them and
+        // exhaust the server's default limit. The pool is dropped at the end
+        // of this function, so the connection does not outlive the setup.
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url())
+            .await
+            .expect("connect to create the schema");
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(&admin)
             .await
@@ -3396,6 +3641,16 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
 
 ```rust
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in &request.tasks {
+            if !seen.insert((spec.tile, spec.task_type)) {
+                return Err(TaskStoreError::DuplicateTask {
+                    tile: spec.tile,
+                    task_type: spec.task_type,
+                });
+            }
+        }
+
         if request.tasks.is_empty() {
             return Err(TaskStoreError::EmptyJob {
                 region_code: request.region_code,
@@ -3404,45 +3659,96 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         }
 
         let now = self.clock.now();
-        let backoff_secs =
-            i64::try_from(request.backoff.as_secs()).unwrap_or(i64::MAX);
-        let max_attempts = i32::try_from(request.max_attempts).unwrap_or(i32::MAX);
-        let revision = i32::try_from(request.revision).unwrap_or(i32::MAX);
+        // Both conversions below are infallible: the columns are bigint, and
+        // every u32 fits in an i64. Saturating instead would be silent
+        // corruption -- two different revisions mapping onto one stored value
+        // would make two distinct jobs share an identity, and
+        // (region_code, revision) is exactly what decides whether a request
+        // resumes an existing job or starts a new one.
+        let max_attempts = i64::from(request.max_attempts);
+        let revision = i64::from(request.revision);
+        // A backoff is a u64 of seconds, which genuinely can exceed i64. It is
+        // refused rather than saturated, because a silently shortened backoff
+        // would let a failing tile burn its whole attempt budget at once.
+        let backoff_secs = i64::try_from(request.backoff.as_secs()).map_err(|_| {
+            TaskStoreError::Adapter(format!(
+                "backoff of {} seconds exceeds the representable range",
+                request.backoff.as_secs()
+            ))
+        })?;
 
         let mut tx = self.pool.begin().await.map_err(adapter)?;
 
-        // Lock the identity so two concurrent creations cannot both insert.
-        let existing: Option<(Uuid, i32, i64)> = sqlx::query_as(
-            "SELECT id, max_attempts, backoff_secs FROM jobs \
-             WHERE region_code = $1 AND revision = $2 FOR UPDATE",
+        // Insert first, then fall back to resuming. The obvious order --
+        // look for the identity, then insert if absent -- does not work
+        // here: `SELECT ... FOR UPDATE` locks rows that EXIST, so a
+        // brand-new identity has no row to lock, two concurrent creators
+        // both find nothing, and both insert. One then receives a bare
+        // unique violation where the in-memory adapter, serialised by its
+        // mutex, resumes. That is not hypothetical for OXO, where dispatch
+        // is pull and several pods can call create_job for the same region
+        // as they start.
+        //
+        // Inserting first makes the unique index itself the arbiter. The
+        // loser's statement waits for the winner's transaction to finish;
+        // if it committed, DO NOTHING applies and we fall through to the
+        // resume path, where the winner's tasks are already visible because
+        // they were committed in the same transaction. If it aborted, no
+        // conflict remains and this insert simply succeeds. The fall-through
+        // relies on READ COMMITTED, PostgreSQL's default, where each
+        // statement sees the latest committed data.
+        let job_uuid = Uuid::new_v4();
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (region_code, revision) DO NOTHING \
+             RETURNING id",
         )
+        .bind(job_uuid)
         .bind(&request.region_code)
         .bind(revision)
+        .bind(max_attempts)
+        .bind(backoff_secs)
+        .bind(now)
         .fetch_optional(&mut *tx)
         .await
         .map_err(adapter)?;
 
-        if let Some((run_uuid, existing_attempts, existing_backoff)) = existing {
-            let job_id = JobId::from_uuid(run_uuid);
+        if inserted.is_none() {
+            // DO NOTHING fired, so a committed row holds this identity --
+            // an aborted one would have left no conflict and let the insert
+            // through. Reading it back cannot come up empty.
+            let (existing_uuid, existing_attempts, existing_backoff): (Uuid, i64, i64) =
+                sqlx::query_as(
+                    "SELECT id, max_attempts, backoff_secs FROM jobs \
+                     WHERE region_code = $1 AND revision = $2",
+                )
+                .bind(&request.region_code)
+                .bind(revision)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(adapter)?;
+
             let rows: Vec<(String, String)> =
                 sqlx::query_as("SELECT tile, task_type FROM tasks WHERE job_id = $1")
-                    .bind(run_uuid)
+                    .bind(existing_uuid)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(adapter)?;
 
             let mut existing_set: Vec<(String, String)> = rows;
             existing_set.sort();
+            // No dedup: the duplicate guard at the top of this function has
+            // already proved the request carries no repeated pair, and the
+            // table's UNIQUE constraint says the same of the stored side.
             let mut requested: Vec<(String, String)> = request
                 .tasks
                 .iter()
                 .map(|spec| (spec.tile.to_string(), spec.task_type.as_str().to_string()))
                 .collect();
             requested.sort();
-            requested.dedup();
 
-            let same_policy =
-                existing_attempts == max_attempts && existing_backoff == backoff_secs;
+            let same_policy = existing_attempts == max_attempts && existing_backoff == backoff_secs;
             if existing_set != requested || !same_policy {
                 return Err(TaskStoreError::JobConflict {
                     region_code: request.region_code,
@@ -3453,35 +3759,25 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
             tx.commit().await.map_err(adapter)?;
             let total_tasks = u32::try_from(existing_set.len()).unwrap_or(u32::MAX);
             return Ok(JobCreated {
-                job_id,
+                job_id: JobId::from_uuid(existing_uuid),
                 created: false,
                 total_tasks,
             });
         }
 
-        let run_uuid = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(run_uuid)
-        .bind(&request.region_code)
-        .bind(revision)
-        .bind(max_attempts)
-        .bind(backoff_secs)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(adapter)?;
-
         for spec in &request.tasks {
             sqlx::query(
+                // No ON CONFLICT clause. The duplicate guard makes a
+                // collision within one request impossible, and job_uuid is
+                // freshly minted so it cannot collide across jobs. A
+                // conflict here would mean an assumption has broken, and
+                // should fail loudly rather than quietly create fewer tasks
+                // than were asked for.
                 "INSERT INTO tasks (id, job_id, tile, task_type, state, attempts, claimable_at) \
-                 VALUES ($1, $2, $3, $4, 'pending', 0, $5) \
-                 ON CONFLICT (job_id, tile, task_type) DO NOTHING",
+                 VALUES ($1, $2, $3, $4, 'pending', 0, $5)",
             )
             .bind(Uuid::new_v4())
-            .bind(run_uuid)
+            .bind(job_uuid)
             .bind(spec.tile.to_string())
             .bind(spec.task_type.as_str())
             .bind(now)
@@ -3491,7 +3787,7 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         }
 
         let total_tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE job_id = $1")
-            .bind(run_uuid)
+            .bind(job_uuid)
             .fetch_one(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -3499,7 +3795,7 @@ Replace the stub in `oxo-tasks-postgres/src/lib.rs`:
         tx.commit().await.map_err(adapter)?;
 
         Ok(JobCreated {
-            job_id: JobId::from_uuid(run_uuid),
+            job_id: JobId::from_uuid(job_uuid),
             created: true,
             total_tasks: u32::try_from(total_tasks).unwrap_or(u32::MAX),
         })
@@ -3523,7 +3819,7 @@ Replace the stub:
                 .collect()
         });
 
-        let row: Option<(Uuid, Uuid, String, String, i32)> = sqlx::query_as(
+        let row: Option<(Uuid, Uuid, String, String, i64)> = sqlx::query_as(
             "UPDATE tasks SET \
                  state = 'claimed', lease_token = $1, claimed_by = $2, \
                  claimed_at = $3, last_heartbeat_at = $3, attempts = attempts + 1 \
@@ -3545,13 +3841,13 @@ Replace the stub:
         .await
         .map_err(adapter)?;
 
-        let Some((task_uuid, run_uuid, tile, task_type, attempts)) = row else {
+        let Some((task_uuid, job_uuid, tile, task_type, attempts)) = row else {
             return Ok(None);
         };
 
         Ok(Some(ClaimedTask {
             task_id: TaskId::from_uuid(task_uuid),
-            job_id: JobId::from_uuid(run_uuid),
+            job_id: JobId::from_uuid(job_uuid),
             lease: token,
             tile: tile.parse().map_err(|error| {
                 TaskStoreError::Adapter(format!("stored tile {tile:?} is not a valid identifier: {error}"))
@@ -3568,6 +3864,73 @@ Add the imports this needs: `oxo_tasks::ids::{TaskId, LeaseToken}`, `oxo_tasks::
 
 Note the two `Adapter` errors on conversion. They should be unreachable — the `CHECK` constraint and the specification's validation both prevent them — but a store that silently mangled a tile identifier would be far worse than one that says it found something it could not read.
 
+- [ ] **Step 4b: Pin the concurrent-creation invariant in the conformance suite**
+
+The insert-first ordering above is not covered by any existing case: the
+suite's one concurrency case exercises `claim`, and
+`creating_a_job_twice_resumes_it` is sequential. Without a case, the
+divergence this fixes can return silently.
+
+Add to `oxo-tasks/src/conformance.rs`, before the
+`a_failure_is_requeued_until_the_budget_is_spent` case:
+
+```rust
+/// Several creators of one brand-new job must agree on the outcome.
+///
+/// Not hypothetical for OXO: dispatch is pull, so several pods can call
+/// `create_job` for the same region and revision as they start. Exactly one
+/// must create it and the rest must resume it, all naming the same job and
+/// the same task count. A store that looks for the identity and only then
+/// inserts cannot promise this -- `SELECT ... FOR UPDATE` locks rows that
+/// exist, and a brand-new identity has none -- so every caller finds
+/// nothing, all of them insert, and the losers get a constraint violation
+/// where the contract says they should resume.
+pub async fn concurrent_creation_of_one_job_happens_once(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let store: Arc<dyn TaskStore> = Arc::from(subject.store);
+
+    let mut creators = Vec::new();
+    for _ in 0..4 {
+        let store = Arc::clone(&store);
+        creators.push(tokio::spawn(
+            async move { store.create_job(two_task_job()).await },
+        ));
+    }
+
+    let mut outcomes = Vec::new();
+    for creator in creators {
+        outcomes.push(
+            creator
+                .await
+                .expect("creator did not panic")
+                .expect("create_job either creates the job or resumes it, never fails"),
+        );
+    }
+
+    let created = outcomes.iter().filter(|outcome| outcome.created).count();
+    assert_eq!(created, 1, "exactly one caller created the job");
+
+    let job_id = outcomes[0].job_id;
+    for outcome in &outcomes {
+        assert_eq!(outcome.job_id, job_id, "every caller names the same job");
+        assert_eq!(
+            outcome.total_tasks, 2,
+            "every caller sees the whole task set, including the ones that resumed"
+        );
+    }
+}
+```
+
+and register it in `conformance_suite!`, immediately after
+`a_job_with_a_duplicated_task_is_refused`:
+
+```rust
+        $crate::conformance_case!($fixture, concurrent_creation_of_one_job_happens_once);
+```
+
+The suite is now 19 cases. The parity test added in Task 8 will fail if the
+definition and the registration do not both land.
+
 - [ ] **Step 5: Run the suite**
 
 Run: `make verify-db`
@@ -3578,7 +3941,7 @@ Expected: the creation, claim, filter, empty-queue and concurrency cases PASS; t
 ```bash
 git add oxo-tasks-postgres/
 git commit -F - <<'EOF'
-feat(tasks-pg): create runs idempotently and claim with SKIP LOCKED
+feat(tasks-pg): create jobs idempotently and claim with SKIP LOCKED
 
 create_job locks the (region_code, revision) identity before deciding, so
 two concurrent creations cannot both insert, and compares the stored task
@@ -3618,12 +3981,21 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
     /// be invalid. A single query so the checks cannot drift apart between
     /// the three reporting calls, and so the answer cannot change between
     /// two of them.
+    ///
+    /// `FOR UPDATE` is load-bearing, and here it genuinely locks: the row
+    /// exists, so the lock holds for the caller's transaction and the reaper
+    /// cannot reclaim the task between this check and the write that follows
+    /// it. Without it the write's own `lease_token` predicate would match no
+    /// rows and the call would report success having changed nothing -- the
+    /// in-memory adapter holds its mutex across the whole operation, so it
+    /// has no such window. Note the contrast with `create_job`, where the
+    /// row does NOT yet exist and `FOR UPDATE` would lock nothing at all.
     async fn resolve<'e, E>(executor: E, lease: Lease) -> Result<(), TaskStoreError>
     where
         E: sqlx::PgExecutor<'e>,
     {
         let row: Option<(String, Option<Uuid>)> =
-            sqlx::query_as("SELECT state, lease_token FROM tasks WHERE id = $1")
+            sqlx::query_as("SELECT state, lease_token FROM tasks WHERE id = $1 FOR UPDATE")
                 .bind(lease.task_id.as_uuid())
                 .fetch_optional(executor)
                 .await
@@ -3686,9 +4058,9 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
         let mut tx = self.pool.begin().await.map_err(adapter)?;
         Self::resolve(&mut *tx, request.lease).await?;
 
-        let (attempts, max_attempts, backoff_secs): (i32, i32, i64) = sqlx::query_as(
-            "SELECT j.attempts, r.max_attempts, r.backoff_secs \
-             FROM tasks j JOIN jobs r ON r.id = j.job_id WHERE j.id = $1",
+        let (attempts, max_attempts, backoff_secs): (i64, i64, i64) = sqlx::query_as(
+            "SELECT t.attempts, j.max_attempts, j.backoff_secs \
+             FROM tasks t JOIN jobs j ON j.id = t.job_id WHERE t.id = $1",
         )
         .bind(request.lease.task_id.as_uuid())
         .fetch_one(&mut *tx)
@@ -3699,10 +4071,11 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
             sqlx::query(
                 "UPDATE tasks SET state = 'abandoned', lease_token = NULL, claimed_by = NULL, \
                      claimed_at = NULL, last_heartbeat_at = NULL, last_failure = $2 \
-                 WHERE id = $1",
+                 WHERE id = $1 AND lease_token = $3",
             )
             .bind(request.lease.task_id.as_uuid())
             .bind(&request.reason)
+            .bind(request.lease.token.as_uuid())
             .execute(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -3713,11 +4086,12 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
                 "UPDATE tasks SET state = 'pending', claimable_at = $2, lease_token = NULL, \
                      claimed_by = NULL, claimed_at = NULL, last_heartbeat_at = NULL, \
                      last_failure = $3 \
-                 WHERE id = $1",
+                 WHERE id = $1 AND lease_token = $4",
             )
             .bind(request.lease.task_id.as_uuid())
             .bind(claimable_at)
             .bind(&request.reason)
+            .bind(request.lease.token.as_uuid())
             .execute(&mut *tx)
             .await
             .map_err(adapter)?;
@@ -3745,20 +4119,31 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
                 .unwrap_or(chrono::Duration::zero());
 
         // One statement so a concurrent reaper cannot double-count: each
-        // expired row is updated by exactly one of them. The CASE spends the
-        // start that was already consumed at claim, abandoning when the
-        // budget is gone and requeueing with backoff otherwise.
+        // expired row is updated by exactly one of them. The loser of a
+        // contested row blocks, then re-checks the predicate against the
+        // committed row, finds it no longer 'claimed', and drops it from its
+        // own result set -- so the row is counted once, not twice and not
+        // never. The CASE spends the start that was already consumed at
+        // claim, abandoning when the budget is gone and requeueing with
+        // backoff otherwise.
+        //
+        // Two reapers running at once can deadlock each other, as any pair of
+        // large concurrent bulk updates can, if they reach the same rows in
+        // different orders. PostgreSQL detects it and aborts one side, which
+        // arrives here as a retryable `Adapter` error rather than as
+        // corruption, so a caller that retries is correct. One reaper is the
+        // expected deployment.
         let rows: Vec<(String,)> = sqlx::query_as(
-            "UPDATE tasks AS j SET \
-                 state = CASE WHEN j.attempts >= r.max_attempts THEN 'abandoned' ELSE 'pending' END, \
-                 claimable_at = CASE WHEN j.attempts >= r.max_attempts THEN j.claimable_at \
-                                     ELSE $1 + (r.backoff_secs * interval '1 second') END, \
+            "UPDATE tasks AS t SET \
+                 state = CASE WHEN t.attempts >= j.max_attempts THEN 'abandoned' ELSE 'pending' END, \
+                 claimable_at = CASE WHEN t.attempts >= j.max_attempts THEN t.claimable_at \
+                                     ELSE $1 + (j.backoff_secs * interval '1 second') END, \
                  lease_token = NULL, claimed_by = NULL, claimed_at = NULL, \
                  last_heartbeat_at = NULL \
-             FROM jobs AS r \
-             WHERE r.id = j.job_id AND j.state = 'claimed' \
-               AND (j.last_heartbeat_at < $2 OR j.claimed_at < $3) \
-             RETURNING j.state",
+             FROM jobs AS j \
+             WHERE j.id = t.job_id AND t.state = 'claimed' \
+               AND (t.last_heartbeat_at < $2 OR t.claimed_at < $3) \
+             RETURNING t.state",
         )
         .bind(now)
         .bind(heartbeat_cutoff)
@@ -3779,7 +4164,7 @@ Add to `impl PostgresTaskStore` in `oxo-tasks-postgres/src/lib.rs`:
     }
 ```
 
-`RETURNING j.state` returns the value the `CASE` just assigned, because
+`RETURNING t.state` returns the value the `CASE` just assigned, because
 `RETURNING` sees the new row — simpler than recomputing the branch and
 unambiguously the same answer. Note also that `backoff_secs` is `bigint`
 while `make_interval(secs => …)` takes `double precision` with no implicit
@@ -3788,7 +4173,7 @@ cast from `bigint`, which is why the interval is built by multiplication.
 - [ ] **Step 5: Run the suite**
 
 Run: `make verify-db`
-Expected: all cases except the two gate cases and the throughput case PASS. Report the counts.
+Expected: 16 passed / 4 failed of 20. The four that remain are the three cases that call `job_status` — `the_gate_moves_from_in_progress_to_complete`, `an_abandoned_task_is_visible_before_it_fails_the_job` and `an_unknown_job_is_refused_by_the_gate` — plus `throughput_separates_pending_from_claimable_now`. All four must panic at an `unimplemented!("Task 12")`; an assertion failure instead means the two adapters have diverged and is more important than finishing the task.
 
 - [ ] **Step 6: Commit**
 
@@ -3908,10 +4293,10 @@ Then the two methods:
 - [ ] **Step 3: Run the whole suite against both adapters**
 
 Run: `make verify`
-Expected: PASS, including the 15 in-memory conformance tests.
+Expected: PASS, including the 19 in-memory conformance tests.
 
 Run: `make verify-db`
-Expected: PASS, all 15 conformance cases plus the migration test — 16 tests against a real PostgreSQL.
+Expected: PASS, all 19 conformance cases plus the migration test — 20 tests against a real PostgreSQL.
 
 - [ ] **Step 4: Confirm no stubs survive**
 
@@ -3935,10 +4320,10 @@ git commit -F - <<'EOF'
 feat(tasks-pg): answer the completion gate and the throughput snapshot
 
 Both read one aggregate query with FILTER clauses, so the gate and the
-snapshot cannot disagree about a job. An unknown run is refused rather
+snapshot cannot disagree about a job. An unknown job is refused rather
 than reported as an empty-and-therefore-complete one.
 
-The conformance suite now passes in full against both adapters: fifteen
+The conformance suite now passes in full against both adapters: nineteen
 invariants, identical cases, one in memory and one against a real
 PostgreSQL. That is what makes the in-memory adapter trustworthy as a test
 double rather than a convenient fiction.
@@ -3953,7 +4338,7 @@ EOF
 
 When all twelve tasks are done:
 
-- `make verify` passes, including 15 in-memory conformance tests.
+- `make verify` passes, including 19 in-memory conformance tests.
 - `make verify-db` passes, including the same 15 against a real PostgreSQL.
 - No `unimplemented!` remains in either crate.
 - `cargo tree --package oxo-tasks --edges normal` shows no database or network dependency.

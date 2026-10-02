@@ -1,0 +1,27 @@
+[package]
+name = "oxo-tasks"
+description = "Task store port, state machine and in-memory adapter for the Ortho4 XEarthLayer Orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+oxo-spec = { path = "../oxo-spec" }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+# Exposes the conformance suite so another crate's adapter can be held to
+# the same contract. Off by default: it is test scaffolding, not API.
+conformance = ["tokio"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[test]]
+name = "conformance_memory"
+required-features = ["conformance"]
