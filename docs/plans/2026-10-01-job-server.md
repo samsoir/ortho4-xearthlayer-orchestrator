@@ -4160,7 +4160,7 @@ cast from `bigint`, which is why the interval is built by multiplication.
 - [ ] **Step 5: Run the suite**
 
 Run: `make verify-db`
-Expected: all cases except the two gate cases and the throughput case PASS. Report the counts.
+Expected: 16 passed / 4 failed of 20. The four that remain are the three cases that call `job_status` — `the_gate_moves_from_in_progress_to_complete`, `an_abandoned_task_is_visible_before_it_fails_the_job` and `an_unknown_job_is_refused_by_the_gate` — plus `throughput_separates_pending_from_claimable_now`. All four must panic at an `unimplemented!("Task 12")`; an assertion failure instead means the two adapters have diverged and is more important than finishing the task.
 
 - [ ] **Step 6: Commit**
 
@@ -4310,7 +4310,7 @@ Both read one aggregate query with FILTER clauses, so the gate and the
 snapshot cannot disagree about a job. An unknown job is refused rather
 than reported as an empty-and-therefore-complete one.
 
-The conformance suite now passes in full against both adapters: fifteen
+The conformance suite now passes in full against both adapters: nineteen
 invariants, identical cases, one in memory and one against a real
 PostgreSQL. That is what makes the in-memory adapter trustworthy as a test
 double rather than a convenient fiction.
@@ -4325,7 +4325,7 @@ EOF
 
 When all twelve tasks are done:
 
-- `make verify` passes, including 15 in-memory conformance tests.
+- `make verify` passes, including 19 in-memory conformance tests.
 - `make verify-db` passes, including the same 15 against a real PostgreSQL.
 - No `unimplemented!` remains in either crate.
 - `cargo tree --package oxo-tasks --edges normal` shows no database or network dependency.
