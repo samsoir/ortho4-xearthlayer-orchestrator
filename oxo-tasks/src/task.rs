@@ -22,6 +22,14 @@ impl TaskType {
 
     /// Parse the canonical form. Exact match only — no case folding, so a
     /// database label and this enum cannot drift apart silently.
+    ///
+    /// The reason these string forms exist at all: the PostgreSQL schema
+    /// stores task type and state as `text` with a `CHECK` constraint rather
+    /// than as PostgreSQL enums. A PostgreSQL enum would require
+    /// `#[derive(sqlx::Type)]` on this enum, which would pull `sqlx` into
+    /// `oxo-tasks` and break the crate split that lets a consumer depend on
+    /// the port without a database driver. Do not "improve" this to a
+    /// PostgreSQL enum without reading that decision first.
     pub fn from_str_exact(text: &str) -> Option<Self> {
         match text {
             "ortho" => Some(Self::Ortho),
@@ -57,6 +65,16 @@ impl TaskState {
         }
     }
 
+    /// Parse the canonical form. Exact match only — no case folding, so a
+    /// database label and this enum cannot drift apart silently.
+    ///
+    /// The reason these string forms exist at all: the PostgreSQL schema
+    /// stores task type and state as `text` with a `CHECK` constraint rather
+    /// than as PostgreSQL enums. A PostgreSQL enum would require
+    /// `#[derive(sqlx::Type)]` on this enum, which would pull `sqlx` into
+    /// `oxo-tasks` and break the crate split that lets a consumer depend on
+    /// the port without a database driver. Do not "improve" this to a
+    /// PostgreSQL enum without reading that decision first.
     pub fn from_str_exact(text: &str) -> Option<Self> {
         match text {
             "pending" => Some(Self::Pending),
@@ -114,5 +132,10 @@ mod tests {
             assert_eq!(TaskState::from_str_exact(state.as_str()), Some(state));
         }
         assert_eq!(TaskState::from_str_exact("running"), None);
+        // A case variant, specifically: this is the assertion that would
+        // catch an accidental `.to_lowercase()` creeping into the parse.
+        // TaskType's round-trip test pins the same rule; without this line
+        // TaskState's exact-match guarantee is unasserted.
+        assert_eq!(TaskState::from_str_exact("PENDING"), None);
     }
 }
