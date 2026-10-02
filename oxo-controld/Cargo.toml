@@ -1,0 +1,19 @@
+[package]
+name = "oxo-controld"
+description = "OXO control plane daemon: serves the claim API over the PostgreSQL adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxo-control = { path = "../oxo-control" }
+oxo-tasks = { path = "../oxo-tasks" }
+oxo-tasks-postgres = { path = "../oxo-tasks-postgres" }
+axum = { workspace = true }
+clap = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

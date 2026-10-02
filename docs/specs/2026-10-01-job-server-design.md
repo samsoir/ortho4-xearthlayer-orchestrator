@@ -354,6 +354,8 @@ every task was handed out exactly once.
 
 ## Settled for sub-project 3, not open
 
+**Implemented by sub-project 3** (see docs/specs/2026-10-02-control-plane-design.md, which records one narrowing: zero stays legal for backoff).
+
 The final whole-branch review of this sub-project raised six questions that
 are answered here rather than left open. None is a defect in the shipped
 code, and none was reachable from this branch, because nothing here builds a

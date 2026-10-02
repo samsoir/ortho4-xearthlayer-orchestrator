@@ -18,9 +18,10 @@ use oxo_spec::TileId;
 
 use crate::clock::TestClock;
 use crate::error::TaskStoreError;
+use crate::quantity::{BackoffSeconds, MaxAttempts, TimeoutSeconds};
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobStatus, Lease, ReapRequest,
-    TaskSpec,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobStatus, Lease,
+    ReapRequest, TaskSpec,
 };
 use crate::store::TaskStore;
 use crate::task::TaskType;
@@ -52,8 +53,8 @@ pub fn two_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
-        max_attempts: 3,
-        backoff: Duration::from_secs(60),
+        max_attempts: MaxAttempts::new(3).expect("non-zero"),
+        backoff: BackoffSeconds::new(60).expect("in range"),
         tasks: vec![
             TaskSpec {
                 tile: tile(50, -2),
@@ -76,8 +77,8 @@ pub fn one_task_job() -> CreateJob {
     CreateJob {
         region_code: "NA".to_string(),
         revision: 1,
-        max_attempts: 3,
-        backoff: Duration::from_secs(60),
+        max_attempts: MaxAttempts::new(3).expect("non-zero"),
+        backoff: BackoffSeconds::new(60).expect("in range"),
         tasks: vec![TaskSpec {
             tile: tile(50, -2),
             task_type: TaskType::Ortho,
@@ -303,8 +304,8 @@ pub async fn a_reclaimed_task_refuses_its_previous_holder(fixture: &dyn Fixture)
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(86_400),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(86_400).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -444,7 +445,7 @@ pub async fn concurrent_creation_of_one_job_happens_once(fixture: &dyn Fixture) 
 pub async fn a_failure_is_requeued_until_the_budget_is_spent(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
-    job.max_attempts = 2;
+    job.max_attempts = MaxAttempts::new(2).expect("non-zero");
     subject.store.create_job(job).await.expect("create");
 
     let first = subject
@@ -580,7 +581,7 @@ pub async fn an_empty_task_type_filter_claims_nothing(fixture: &dyn Fixture) {
 pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut job = two_task_job();
-    job.max_attempts = 1;
+    job.max_attempts = MaxAttempts::new(1).expect("non-zero");
     subject.store.create_job(job).await.expect("create");
 
     subject
@@ -594,8 +595,8 @@ pub async fn a_lapsed_heartbeat_reclaims_the_task_and_spends_a_start(fixture: &d
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(86_400),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(86_400).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -632,8 +633,8 @@ pub async fn a_diligent_but_wedged_worker_is_cut_off_by_the_backstop(fixture: &d
     let reaped = subject
         .store
         .reap_expired(ReapRequest {
-            heartbeat_timeout: Duration::from_secs(90),
-            max_task_duration: Duration::from_secs(120),
+            heartbeat_timeout: TimeoutSeconds::new(90).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(120).expect("non-zero"),
         })
         .await
         .expect("reap");
@@ -669,7 +670,7 @@ pub async fn the_gate_moves_from_in_progress_to_complete(fixture: &dyn Fixture) 
 pub async fn an_abandoned_task_is_visible_before_it_fails_the_job(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let mut spec = two_task_job();
-    spec.max_attempts = 1;
+    spec.max_attempts = MaxAttempts::new(1).expect("non-zero");
     let job = subject.store.create_job(spec).await.expect("create");
 
     let doomed = subject
@@ -811,6 +812,210 @@ pub async fn concurrent_claims_hand_each_task_out_exactly_once(fixture: &dyn Fix
     assert_eq!(all, unique, "no task was claimed twice");
 }
 
+/// The likeliest duplicate call in production: a worker completes, the
+/// response is lost, and it retries.
+pub async fn completing_a_task_twice_reports_not_claimed(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    let claimed = subject
+        .store
+        .claim(any_task("w1"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let lease = lease_of(&claimed);
+    subject.store.complete(lease).await.expect("first complete");
+    let error = subject
+        .store
+        .complete(lease)
+        .await
+        .expect_err("second complete must be refused");
+    assert!(
+        matches!(error, TaskStoreError::NotClaimed { task_id } if task_id == claimed.task_id),
+        "got {error:?}"
+    );
+}
+
+/// The policy arm of `JobConflict`: the task set matches, the failure policy
+/// does not.
+pub async fn resuming_a_job_with_a_different_policy_is_a_conflict(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    subject
+        .store
+        .create_job(two_task_job())
+        .await
+        .expect("create");
+
+    let mut slower = two_task_job();
+    slower.backoff = BackoffSeconds::new(61).expect("in range");
+    let mut stricter = two_task_job();
+    stricter.max_attempts = MaxAttempts::new(4).expect("non-zero");
+
+    for altered in [slower, stricter] {
+        let error = subject
+            .store
+            .create_job(altered)
+            .await
+            .expect_err("a changed policy must conflict");
+        assert!(
+            matches!(
+                &error,
+                TaskStoreError::JobConflict { region_code, revision }
+                    if region_code == "NA" && *revision == 1
+            ),
+            "expected JobConflict for NA revision 1, got {error:?}"
+        );
+    }
+}
+
+pub async fn two_revisions_of_one_region_are_separate_jobs(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create revision 1");
+    let mut second_spec = one_task_job();
+    second_spec.revision = 2;
+    let second = subject
+        .store
+        .create_job(second_spec)
+        .await
+        .expect("create revision 2");
+    assert!(first.created);
+    assert!(second.created);
+    assert_ne!(first.job_id, second.job_id);
+
+    // Both tasks became claimable at one instant, so which comes out first is
+    // unspecified. Claim both and complete only revision 1's.
+    let mut claimed = Vec::new();
+    while let Some(task) = subject.store.claim(any_task("pod")).await.expect("claim") {
+        claimed.push(task);
+    }
+    assert_eq!(claimed.len(), 2, "each revision has its own task");
+    let ours = claimed
+        .iter()
+        .find(|task| task.job_id == first.job_id)
+        .expect("revision 1's task was handed out");
+    subject
+        .store
+        .complete(lease_of(ours))
+        .await
+        .expect("complete");
+
+    assert_eq!(
+        subject
+            .store
+            .job_status(first.job_id)
+            .await
+            .expect("status"),
+        JobStatus::Complete
+    );
+    assert!(
+        matches!(
+            subject
+                .store
+                .job_status(second.job_id)
+                .await
+                .expect("status"),
+            JobStatus::InProgress { .. }
+        ),
+        "revision 2 is untouched by revision 1's completion"
+    );
+}
+
+/// Set comparison, not sequence comparison.
+pub async fn a_task_set_matches_regardless_of_order(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(two_task_job())
+        .await
+        .expect("create");
+    let mut reversed = two_task_job();
+    reversed.tasks = two_task_job().tasks.into_iter().rev().collect();
+    let second = subject
+        .store
+        .create_job(reversed)
+        .await
+        .expect("a reordered task set resumes the job");
+    assert!(first.created);
+    assert!(!second.created);
+    assert_eq!(first.job_id, second.job_id);
+}
+
+/// Ordering is by when a task became claimable, with an identity tie-break
+/// inside a single instant. Tasks created together share one instant, so the
+/// case spans two deliberately.
+pub async fn claims_serve_the_oldest_claimable_task_first(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let first = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    subject.clock.advance(Duration::from_secs(10));
+    let mut later_spec = one_task_job();
+    later_spec.region_code = "EU".to_string();
+    later_spec.tasks[0].tile = tile(48, 2);
+    let later = subject.store.create_job(later_spec).await.expect("create");
+
+    let one = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    let two = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("a task");
+    assert_eq!(one.job_id, first.job_id, "the older task is served first");
+    assert_eq!(two.job_id, later.job_id, "the newer task is served second");
+}
+
+pub async fn find_job_recovers_a_created_jobs_identity(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let created = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    let found = subject
+        .store
+        .find_job(FindJob {
+            region_code: "NA".to_string(),
+            revision: 1,
+        })
+        .await
+        .expect("find");
+    assert_eq!(found, Some(created.job_id));
+    let absent_revision = subject
+        .store
+        .find_job(FindJob {
+            region_code: "NA".to_string(),
+            revision: 2,
+        })
+        .await
+        .expect("find");
+    assert_eq!(absent_revision, None);
+    let absent_region = subject
+        .store
+        .find_job(FindJob {
+            region_code: "EU".to_string(),
+            revision: 1,
+        })
+        .await
+        .expect("find");
+    assert_eq!(absent_region, None);
+}
+
 /// Generate one `#[tokio::test]` per conformance case.
 ///
 /// Takes an expression producing a [`Fixture`]. The case list lives here and
@@ -852,6 +1057,15 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, an_unknown_job_is_refused_by_the_gate);
         $crate::conformance_case!($fixture, throughput_separates_pending_from_claimable_now);
         $crate::conformance_case!($fixture, concurrent_claims_hand_each_task_out_exactly_once);
+        $crate::conformance_case!($fixture, completing_a_task_twice_reports_not_claimed);
+        $crate::conformance_case!(
+            $fixture,
+            resuming_a_job_with_a_different_policy_is_a_conflict
+        );
+        $crate::conformance_case!($fixture, two_revisions_of_one_region_are_separate_jobs);
+        $crate::conformance_case!($fixture, a_task_set_matches_regardless_of_order);
+        $crate::conformance_case!($fixture, claims_serve_the_oldest_claimable_task_first);
+        $crate::conformance_case!($fixture, find_job_recovers_a_created_jobs_identity);
     };
 }
 

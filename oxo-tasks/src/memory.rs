@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,12 +8,20 @@ use oxo_spec::TileId;
 use crate::clock::Clock;
 use crate::error::TaskStoreError;
 use crate::ids::{JobId, LeaseToken, TaskId};
+use crate::quantity::BackoffSeconds;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, TaskSpec, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, TaskSpec, Throughput,
 };
 use crate::store::TaskStore;
 use crate::task::{TaskState, TaskType};
+
+/// Convert a bounded quantity of seconds to a `chrono` duration.
+fn chrono_seconds(seconds: u64) -> chrono::Duration {
+    chrono::Duration::seconds(
+        i64::try_from(seconds).expect("bounded by MAX_SECONDS at construction"),
+    )
+}
 
 /// A task store held entirely in memory.
 ///
@@ -48,7 +55,7 @@ struct State {
 #[derive(Debug)]
 struct Job {
     max_attempts: u32,
-    backoff: Duration,
+    backoff: BackoffSeconds,
     task_ids: Vec<TaskId>,
 }
 
@@ -189,7 +196,7 @@ impl TaskStore for InMemoryTaskStore {
                 request.tasks.iter().map(task_key).collect();
 
             let same_policy =
-                job.max_attempts == request.max_attempts && job.backoff == request.backoff;
+                job.max_attempts == request.max_attempts.get() && job.backoff == request.backoff;
             if existing != requested || !same_policy {
                 return Err(TaskStoreError::JobConflict {
                     region_code: request.region_code,
@@ -230,7 +237,7 @@ impl TaskStore for InMemoryTaskStore {
         state.jobs.insert(
             job_id,
             Job {
-                max_attempts: request.max_attempts,
+                max_attempts: request.max_attempts.get(),
                 backoff: request.backoff,
                 task_ids,
             },
@@ -242,6 +249,14 @@ impl TaskStore for InMemoryTaskStore {
             created: true,
             total_tasks,
         })
+    }
+
+    async fn find_job(&self, request: FindJob) -> Result<Option<JobId>, TaskStoreError> {
+        let state = self.locked();
+        Ok(state
+            .by_identity
+            .get(&(request.region_code, request.revision))
+            .copied())
     }
 
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError> {
@@ -333,7 +348,7 @@ impl TaskStore for InMemoryTaskStore {
             return Ok(FailOutcome::Abandoned);
         }
 
-        let step = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero());
+        let step = chrono_seconds(backoff.get());
         let claimable_at = now + step;
         task.state = TaskState::Pending;
         task.claimable_at = claimable_at;
@@ -346,14 +361,12 @@ impl TaskStore for InMemoryTaskStore {
 
     async fn reap_expired(&self, request: ReapRequest) -> Result<ReapOutcome, TaskStoreError> {
         let now = self.clock.now();
-        let heartbeat_timeout = chrono::Duration::from_std(request.heartbeat_timeout)
-            .unwrap_or(chrono::Duration::zero());
-        let max_duration = chrono::Duration::from_std(request.max_task_duration)
-            .unwrap_or(chrono::Duration::zero());
+        let heartbeat_timeout = chrono_seconds(request.heartbeat_timeout.get());
+        let max_duration = chrono_seconds(request.max_task_duration.get());
         let mut state = self.locked();
 
         // Policies are read before any task is mutably borrowed.
-        let policies: BTreeMap<JobId, (u32, Duration)> = state
+        let policies: BTreeMap<JobId, (u32, BackoffSeconds)> = state
             .jobs
             .iter()
             .map(|(id, job)| (*id, (job.max_attempts, job.backoff)))
@@ -395,7 +408,7 @@ impl TaskStore for InMemoryTaskStore {
                 task.state = TaskState::Abandoned;
                 outcome.abandoned += 1;
             } else {
-                let step = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero());
+                let step = chrono_seconds(backoff.get());
                 task.state = TaskState::Pending;
                 task.claimable_at = now + step;
                 outcome.requeued += 1;
@@ -446,7 +459,9 @@ impl TaskStore for InMemoryTaskStore {
 mod tests {
     use super::*;
     use crate::clock::TestClock;
+    use crate::quantity::{MaxAttempts, TimeoutSeconds};
     use chrono::TimeZone;
+    use std::time::Duration;
 
     fn tile(lat: i8, lon: i16) -> TileId {
         TileId::new(lat, lon).expect("in range")
@@ -464,8 +479,8 @@ mod tests {
         CreateJob {
             region_code: "NA".to_string(),
             revision: 1,
-            max_attempts: 3,
-            backoff: Duration::from_secs(60),
+            max_attempts: MaxAttempts::new(3).expect("non-zero"),
+            backoff: BackoffSeconds::new(60).expect("in range"),
             tasks: vec![
                 TaskSpec {
                     tile: tile(50, -2),
@@ -490,8 +505,8 @@ mod tests {
         CreateJob {
             region_code: "NA".to_string(),
             revision: 1,
-            max_attempts: 3,
-            backoff: Duration::from_secs(60),
+            max_attempts: MaxAttempts::new(3).expect("non-zero"),
+            backoff: BackoffSeconds::new(60).expect("in range"),
             tasks: vec![TaskSpec {
                 tile: tile(50, -2),
                 task_type: TaskType::Ortho,
@@ -549,7 +564,7 @@ mod tests {
         store.create_job(two_tile_job()).await.expect("create");
 
         let mut altered = two_tile_job();
-        altered.max_attempts = 5;
+        altered.max_attempts = MaxAttempts::new(5).expect("non-zero");
 
         let error = store
             .create_job(altered)
@@ -777,8 +792,8 @@ mod tests {
 
     fn reap(heartbeat_secs: u64, max_secs: u64) -> ReapRequest {
         ReapRequest {
-            heartbeat_timeout: Duration::from_secs(heartbeat_secs),
-            max_task_duration: Duration::from_secs(max_secs),
+            heartbeat_timeout: TimeoutSeconds::new(heartbeat_secs).expect("non-zero"),
+            max_task_duration: TimeoutSeconds::new(max_secs).expect("non-zero"),
         }
     }
 
@@ -862,7 +877,7 @@ mod tests {
         let test_clock = clock();
         let store = store(test_clock.clone());
         let mut job = two_tile_job();
-        job.max_attempts = 1;
+        job.max_attempts = MaxAttempts::new(1).expect("non-zero");
         store.create_job(job).await.unwrap();
 
         claim_one(&store).await;
@@ -907,7 +922,7 @@ mod tests {
         let test_clock = clock();
         let store = store(test_clock.clone());
         let mut spec = two_tile_job();
-        spec.max_attempts = 1;
+        spec.max_attempts = MaxAttempts::new(1).expect("non-zero");
         let job = store.create_job(spec).await.unwrap();
 
         let doomed = claim_one(&store).await;

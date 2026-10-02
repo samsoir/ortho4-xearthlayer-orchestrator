@@ -1,20 +1,27 @@
 [workspace]
-members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres"]
+members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control", "oxo-controld"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.74"
+rust-version = "1.75"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 async-trait = "0.1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 thiserror = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "uuid", "chrono", "macros", "migrate"] }
+axum = "0.8"
+serde_json = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.6", features = ["trace"] }

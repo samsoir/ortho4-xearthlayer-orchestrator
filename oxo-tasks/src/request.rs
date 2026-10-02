@@ -1,9 +1,8 @@
-use std::time::Duration;
-
 use chrono::{DateTime, Utc};
 use oxo_spec::TileId;
 
 use crate::ids::{JobId, LeaseToken, TaskId};
+use crate::quantity::{BackoffSeconds, MaxAttempts, TimeoutSeconds};
 use crate::task::TaskType;
 
 /// One unit of work within a job.
@@ -23,9 +22,16 @@ pub struct TaskSpec {
 pub struct CreateJob {
     pub region_code: String,
     pub revision: u32,
-    pub max_attempts: u32,
-    pub backoff: Duration,
+    pub max_attempts: MaxAttempts,
+    pub backoff: BackoffSeconds,
     pub tasks: Vec<TaskSpec>,
+}
+
+/// Recover a job's identity from `(region_code, revision)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindJob {
+    pub region_code: String,
+    pub revision: u32,
 }
 
 /// The outcome of registering a job.
@@ -100,10 +106,10 @@ pub enum FailOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReapRequest {
     /// Reclaim a claimed task if no heartbeat has arrived within this.
-    pub heartbeat_timeout: Duration,
+    pub heartbeat_timeout: TimeoutSeconds,
     /// Reclaim a claimed task once it has been held this long regardless of
     /// heartbeats, covering a worker that is wedged but alive.
-    pub max_task_duration: Duration,
+    pub max_task_duration: TimeoutSeconds,
 }
 
 /// What a reap did.
@@ -153,7 +159,6 @@ pub struct Throughput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn tile(lat: i8, lon: i16) -> TileId {
         TileId::new(lat, lon).expect("in range")
@@ -164,8 +169,8 @@ mod tests {
         let request = CreateJob {
             region_code: "NA".to_string(),
             revision: 1,
-            max_attempts: 3,
-            backoff: Duration::from_secs(60),
+            max_attempts: MaxAttempts::new(3).expect("non-zero"),
+            backoff: BackoffSeconds::new(60).expect("in range"),
             tasks: vec![
                 TaskSpec {
                     tile: tile(50, -2),

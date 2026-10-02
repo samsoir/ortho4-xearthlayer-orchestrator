@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use crate::error::TaskStoreError;
 use crate::ids::JobId;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, Throughput,
 };
 
 /// Durable task state, leasing, retry accounting and the completion gate.
@@ -25,6 +25,13 @@ pub trait TaskStore: Send + Sync {
     /// is [`TaskStoreError::JobConflict`].
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError>;
 
+    /// Recover a job's identity from the one the operator knows.
+    ///
+    /// `Ok(None)` means no such job, which is not an error. This exists so
+    /// a restarted control plane can find a running job without re-running
+    /// the planner just to read `created: false` back from `create_job`.
+    async fn find_job(&self, request: FindJob) -> Result<Option<JobId>, TaskStoreError>;
+
     /// Hand one claimable task to a worker, minting a fresh lease token.
     /// `Ok(None)` means nothing is claimable, which is not an error.
     ///
@@ -32,16 +39,22 @@ pub trait TaskStore: Send + Sync {
     /// reclaimed from a dead worker has already consumed one.
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError>;
 
-    /// Assert that a lease is still held. Returns
-    /// [`TaskStoreError::LeaseLost`] if the task was reclaimed, which tells
-    /// the worker to stop working.
+    /// Assert that a lease is still held.
+    ///
+    /// Two errors both mean "you have lost this task; stop working":
+    /// [`TaskStoreError::NotClaimed`] when the task was reaped and is
+    /// pending again, and [`TaskStoreError::LeaseLost`] once another
+    /// worker has re-claimed it. Which one a caller sees is a matter of
+    /// timing, and callers must treat them identically.
     async fn heartbeat(&self, lease: Lease) -> Result<(), TaskStoreError>;
 
     /// Mark a claimed task succeeded.
+    /// A reclaimed task answers [`TaskStoreError::NotClaimed`] until re-claimed, then [`TaskStoreError::LeaseLost`]; both mean stop.
     async fn complete(&self, lease: Lease) -> Result<(), TaskStoreError>;
 
     /// Record a failure, requeueing after backoff or abandoning if the
     /// attempt budget is spent.
+    /// A reclaimed task answers [`TaskStoreError::NotClaimed`] until re-claimed, then [`TaskStoreError::LeaseLost`]; both mean stop.
     async fn fail(&self, request: FailRequest) -> Result<FailOutcome, TaskStoreError>;
 
     /// Reclaim claimed tasks whose heartbeat has lapsed or which have
