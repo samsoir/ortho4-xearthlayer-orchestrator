@@ -33,9 +33,11 @@ pub struct Subject {
 
 /// Produces a fresh, empty [`Subject`] for each case.
 ///
-/// An adapter backed by a database must give each case genuine isolation —
-/// its own schema, or a truncated one — or cases will interfere and the
-/// failures will be baffling.
+/// An adapter backed by a database must give each case genuine isolation
+/// that is parallel-safe: its own schema or its own database. Truncating
+/// shared tables in `fresh()` will race against concurrent test cases, since
+/// cargo runs all cases in parallel by default. This guarantees the
+/// baffling interference the isolation requirement was meant to prevent.
 #[async_trait]
 pub trait Fixture: Send + Sync {
     async fn fresh(&self) -> Subject;
@@ -706,10 +708,106 @@ macro_rules! conformance_suite {
 #[doc(hidden)]
 macro_rules! conformance_case {
     ($fixture:expr, $case:ident) => {
-        #[tokio::test]
+        /// A current-thread runtime cannot interleave claimants against an
+        /// adapter whose claim never yields, so the concurrency case would
+        /// silently test nothing. Multi-threaded flavor ensures concurrent
+        /// test execution is real against both in-memory and database adapters.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $case() {
             let fixture = $fixture;
             $crate::conformance::$case(&fixture).await;
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn all_cases_are_registered() {
+        let source = include_str!("conformance.rs");
+
+        // Only scan the part before the test module to avoid matching test code
+        let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let scannable = &source[..test_start];
+
+        // Extract all case definitions: `pub async fn <name>(fixture: &dyn Fixture) {`
+        let mut defined = Vec::new();
+        let mut pos = 0;
+        while let Some(idx) = scannable[pos..].find("pub async fn ") {
+            let start = pos + idx + 13; // skip "pub async fn "
+            if let Some(paren_pos) = scannable[start..].find('(') {
+                let name = &scannable[start..start + paren_pos];
+                if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    if let Some(param_end) =
+                        scannable[start + paren_pos..].find("(fixture: &dyn Fixture)")
+                    {
+                        if param_end == 0 {
+                            defined.push(name.to_string());
+                        }
+                    }
+                }
+                pos = start + paren_pos + 1;
+            } else {
+                pos = start + 1;
+            }
+        }
+
+        // Extract all registered cases: look for conformance_case! invocations
+        // Extract the name between $fixture, and the closing )
+        let mut registered = Vec::new();
+        let mut pos = 0;
+        while let Some(idx) = scannable[pos..].find("conformance_case!(") {
+            let start = pos + idx;
+            // Find the position of $fixture, inside this invocation
+            if let Some(fixture_pos) = scannable[start..].find("$fixture,") {
+                let after_fixture = start + fixture_pos + 9; // skip "$fixture,"
+                                                             // Find the closing paren for this invocation
+                if let Some(close_paren) = scannable[after_fixture..].find(')') {
+                    let name_raw = &scannable[after_fixture..after_fixture + close_paren];
+                    let name = name_raw.trim();
+                    if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        registered.push(name.to_string());
+                    }
+                    pos = after_fixture + close_paren + 1;
+                } else {
+                    pos = after_fixture + 1;
+                }
+            } else {
+                pos = start + 18;
+            }
+        }
+
+        // Sort for comparison
+        defined.sort();
+        registered.sort();
+
+        // Check for mismatches
+        let defined_set: std::collections::HashSet<_> = defined.iter().cloned().collect();
+        let registered_set: std::collections::HashSet<_> = registered.iter().cloned().collect();
+
+        let mut unregistered: Vec<_> = defined_set.difference(&registered_set).cloned().collect();
+        let mut undefined: Vec<_> = registered_set.difference(&defined_set).cloned().collect();
+
+        let mut errors = Vec::new();
+        if !unregistered.is_empty() {
+            unregistered.sort();
+            errors.push(format!(
+                "defined but unregistered cases: {}",
+                unregistered.join(", ")
+            ));
+        }
+        if !undefined.is_empty() {
+            undefined.sort();
+            errors.push(format!(
+                "registered but undefined cases: {}",
+                undefined.join(", ")
+            ));
+        }
+
+        assert!(
+            errors.is_empty(),
+            "case registration mismatch: {}",
+            errors.join("; ")
+        );
+    }
 }
