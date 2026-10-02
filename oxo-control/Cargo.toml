@@ -10,3 +10,14 @@ rust-version.workspace = true
 oxo-spec = { path = "../oxo-spec" }
 oxo-tasks = { path = "../oxo-tasks" }
 thiserror = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tower = { workspace = true }
