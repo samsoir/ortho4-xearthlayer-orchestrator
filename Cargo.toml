@@ -1,12 +1,12 @@
 [workspace]
-members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres"]
+members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.74"
+rust-version = "1.75"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

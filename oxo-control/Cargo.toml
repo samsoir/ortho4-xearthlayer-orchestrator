@@ -1,0 +1,12 @@
+[package]
+name = "oxo-control"
+description = "OXO control plane: planner, claim API and reaper over the task-store port"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxo-spec = { path = "../oxo-spec" }
+oxo-tasks = { path = "../oxo-tasks" }
+thiserror = { workspace = true }
