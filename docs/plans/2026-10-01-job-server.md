@@ -3580,7 +3580,16 @@ impl Fixture for Postgres {
     async fn fresh(&self) -> Subject {
         let schema = format!("conf_{}", Uuid::new_v4().simple());
 
-        let admin = pool().await;
+        // One connection, not the shared pool's eight: this only issues a
+        // CREATE SCHEMA, and eighteen cases running concurrently would
+        // otherwise open well over a hundred connections between them and
+        // exhaust the server's default limit. The pool is dropped at the end
+        // of this function, so the connection does not outlive the setup.
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url())
+            .await
+            .expect("connect to create the schema");
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(&admin)
             .await
