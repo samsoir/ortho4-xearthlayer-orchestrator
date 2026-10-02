@@ -145,5 +145,12 @@ fn the_report_contains_faults(world: &mut SpecWorld, expected: usize) {
 
 #[tokio::main]
 async fn main() {
-    SpecWorld::run("features").await;
+    // `run` treats an *undefined* step as skipped, not failed, and still
+    // exits 0 — so a typo or a step-regex rename would silently remove
+    // acceptance coverage from the artifact that carries the acceptance
+    // criteria. `fail_on_skipped` plus `run_and_exit` makes that a failure.
+    SpecWorld::cucumber()
+        .fail_on_skipped()
+        .run_and_exit("features")
+        .await;
 }
