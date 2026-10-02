@@ -18,8 +18,8 @@ use oxo_tasks::clock::Clock;
 use oxo_tasks::error::TaskStoreError;
 use oxo_tasks::ids::{JobId, LeaseToken, TaskId};
 use oxo_tasks::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, Throughput,
 };
 use oxo_tasks::store::TaskStore;
 use oxo_tasks::task::TaskType;
@@ -291,6 +291,18 @@ impl TaskStore for PostgresTaskStore {
             total_tasks: u32::try_from(total_tasks).unwrap_or(u32::MAX),
         })
     }
+    async fn find_job(&self, request: FindJob) -> Result<Option<JobId>, TaskStoreError> {
+        let revision = i64::from(request.revision);
+        let row: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM jobs WHERE region_code = $1 AND revision = $2")
+                .bind(&request.region_code)
+                .bind(revision)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(adapter)?;
+        Ok(row.map(|(id,)| JobId::from_uuid(id)))
+    }
+
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError> {
         let now = self.clock.now();
         let token = LeaseToken::generate();

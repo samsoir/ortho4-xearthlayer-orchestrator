@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use crate::error::TaskStoreError;
 use crate::ids::JobId;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, Throughput,
 };
 
 /// Durable task state, leasing, retry accounting and the completion gate.
@@ -24,6 +24,13 @@ pub trait TaskStore: Send + Sync {
     /// Calling it with the same identity but a different task set or policy
     /// is [`TaskStoreError::JobConflict`].
     async fn create_job(&self, request: CreateJob) -> Result<JobCreated, TaskStoreError>;
+
+    /// Recover a job's identity from the one the operator knows.
+    ///
+    /// `Ok(None)` means no such job, which is not an error. This exists so
+    /// a restarted control plane can find a running job without re-running
+    /// the planner just to read `created: false` back from `create_job`.
+    async fn find_job(&self, request: FindJob) -> Result<Option<JobId>, TaskStoreError>;
 
     /// Hand one claimable task to a worker, minting a fresh lease token.
     /// `Ok(None)` means nothing is claimable, which is not an error.

@@ -27,6 +27,13 @@ pub struct CreateJob {
     pub tasks: Vec<TaskSpec>,
 }
 
+/// Recover a job's identity from `(region_code, revision)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindJob {
+    pub region_code: String,
+    pub revision: u32,
+}
+
 /// The outcome of registering a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JobCreated {

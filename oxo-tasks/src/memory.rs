@@ -10,8 +10,8 @@ use crate::error::TaskStoreError;
 use crate::ids::{JobId, LeaseToken, TaskId};
 use crate::quantity::BackoffSeconds;
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobCreated, JobStatus, Lease,
-    ReapOutcome, ReapRequest, TaskSpec, Throughput,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobCreated, JobStatus,
+    Lease, ReapOutcome, ReapRequest, TaskSpec, Throughput,
 };
 use crate::store::TaskStore;
 use crate::task::{TaskState, TaskType};
@@ -249,6 +249,14 @@ impl TaskStore for InMemoryTaskStore {
             created: true,
             total_tasks,
         })
+    }
+
+    async fn find_job(&self, request: FindJob) -> Result<Option<JobId>, TaskStoreError> {
+        let state = self.locked();
+        Ok(state
+            .by_identity
+            .get(&(request.region_code, request.revision))
+            .copied())
     }
 
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError> {

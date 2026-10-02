@@ -20,8 +20,8 @@ use crate::clock::TestClock;
 use crate::error::TaskStoreError;
 use crate::quantity::{BackoffSeconds, MaxAttempts, TimeoutSeconds};
 use crate::request::{
-    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, JobStatus, Lease, ReapRequest,
-    TaskSpec,
+    ClaimRequest, ClaimedTask, CreateJob, FailOutcome, FailRequest, FindJob, JobStatus, Lease,
+    ReapRequest, TaskSpec,
 };
 use crate::store::TaskStore;
 use crate::task::TaskType;
@@ -980,6 +980,42 @@ pub async fn claims_serve_the_oldest_claimable_task_first(fixture: &dyn Fixture)
     assert_eq!(two.job_id, later.job_id, "the newer task is served second");
 }
 
+pub async fn find_job_recovers_a_created_jobs_identity(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let created = subject
+        .store
+        .create_job(one_task_job())
+        .await
+        .expect("create");
+    let found = subject
+        .store
+        .find_job(FindJob {
+            region_code: "NA".to_string(),
+            revision: 1,
+        })
+        .await
+        .expect("find");
+    assert_eq!(found, Some(created.job_id));
+    let absent_revision = subject
+        .store
+        .find_job(FindJob {
+            region_code: "NA".to_string(),
+            revision: 2,
+        })
+        .await
+        .expect("find");
+    assert_eq!(absent_revision, None);
+    let absent_region = subject
+        .store
+        .find_job(FindJob {
+            region_code: "EU".to_string(),
+            revision: 1,
+        })
+        .await
+        .expect("find");
+    assert_eq!(absent_region, None);
+}
+
 /// Generate one `#[tokio::test]` per conformance case.
 ///
 /// Takes an expression producing a [`Fixture`]. The case list lives here and
@@ -1029,6 +1065,7 @@ macro_rules! conformance_suite {
         $crate::conformance_case!($fixture, two_revisions_of_one_region_are_separate_jobs);
         $crate::conformance_case!($fixture, a_task_set_matches_regardless_of_order);
         $crate::conformance_case!($fixture, claims_serve_the_oldest_claimable_task_first);
+        $crate::conformance_case!($fixture, find_job_recovers_a_created_jobs_identity);
     };
 }
 
