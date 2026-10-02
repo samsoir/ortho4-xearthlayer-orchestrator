@@ -175,8 +175,43 @@ impl TaskStore for InMemoryTaskStore {
         })
     }
 
-    async fn claim(&self, _request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError> {
-        unimplemented!("Task 5")
+    async fn claim(&self, request: ClaimRequest) -> Result<Option<ClaimedTask>, TaskStoreError> {
+        let now = self.clock.now();
+        let mut state = self.locked();
+
+        let wanted = request.task_types.as_deref();
+        let next = state
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.state == TaskState::Pending && task.claimable_at <= now)
+            .filter(|(_, task)| wanted.map_or(true, |types| types.contains(&task.task_type)))
+            .min_by_key(|(id, task)| (task.claimable_at, **id))
+            .map(|(id, _)| *id);
+
+        let Some(task_id) = next else {
+            return Ok(None);
+        };
+
+        let token = LeaseToken::generate();
+        let task = state
+            .tasks
+            .get_mut(&task_id)
+            .expect("the id was just selected from this map");
+        task.state = TaskState::Claimed;
+        task.attempts += 1;
+        task.lease = Some(token);
+        task.claimed_by = Some(request.worker);
+        task.claimed_at = Some(now);
+        task.last_heartbeat_at = Some(now);
+
+        Ok(Some(ClaimedTask {
+            task_id,
+            job_id: task.job_id,
+            lease: token,
+            tile: task.tile,
+            task_type: task.task_type,
+            attempt: task.attempts,
+        }))
     }
 
     async fn heartbeat(&self, _lease: Lease) -> Result<(), TaskStoreError> {
@@ -361,5 +396,144 @@ mod tests {
             .expect("should accept different task types on same tile");
         assert!(created.created);
         assert_eq!(created.total_tasks, 2);
+    }
+
+    fn any(worker: &str) -> ClaimRequest {
+        ClaimRequest {
+            worker: worker.to_string(),
+            task_types: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claim_hands_out_one_task_with_a_lease() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        let claimed = store
+            .claim(any("pod-1"))
+            .await
+            .expect("claim")
+            .expect("a task was available");
+        assert_eq!(claimed.attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn each_claim_mints_a_distinct_lease_token() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        let first = store.claim(any("pod-1")).await.unwrap().unwrap();
+        let second = store.claim(any("pod-2")).await.unwrap().unwrap();
+        assert_ne!(first.task_id, second.task_id);
+        assert_ne!(first.lease, second.lease);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_task_is_not_handed_out_again() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        store.claim(any("pod-1")).await.unwrap().unwrap();
+        store.claim(any("pod-2")).await.unwrap().unwrap();
+        let third = store.claim(any("pod-3")).await.unwrap();
+        assert!(
+            third.is_none(),
+            "only two tasks exist, so the third claim finds none"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_queue_is_not_an_error() {
+        let store = store(clock());
+        assert!(store.claim(any("pod-1")).await.expect("claim").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_task_type_filter_restricts_what_is_handed_out() {
+        let store = store(clock());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        let claimed = store
+            .claim(ClaimRequest {
+                worker: "pod-1".to_string(),
+                task_types: Some(vec![TaskType::Overlay]),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.task_type, TaskType::Overlay);
+
+        let again = store
+            .claim(ClaimRequest {
+                worker: "pod-2".to_string(),
+                task_types: Some(vec![TaskType::Overlay]),
+            })
+            .await
+            .unwrap();
+        assert!(again.is_none(), "only one overlay task exists");
+    }
+
+    #[tokio::test]
+    async fn a_task_is_not_claimable_before_its_backoff_elapses() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        // Claim and fail one task so it is requeued with backoff.
+        let claimed = store.claim(any("pod-1")).await.unwrap().unwrap();
+        store
+            .fail(FailRequest {
+                lease: Lease {
+                    task_id: claimed.task_id,
+                    token: claimed.lease,
+                },
+                reason: "Crash!".to_string(),
+            })
+            .await
+            .expect("fail");
+
+        // The other task is still claimable; take it out of the way.
+        store.claim(any("pod-2")).await.unwrap().unwrap();
+
+        assert!(
+            store.claim(any("pod-3")).await.unwrap().is_none(),
+            "the failed task is in backoff and must not be claimable yet"
+        );
+
+        test_clock.advance(Duration::from_secs(60));
+        let after_backoff = store.claim(any("pod-3")).await.unwrap();
+        assert!(
+            after_backoff.is_some(),
+            "backoff has elapsed, so it is claimable"
+        );
+        assert_eq!(after_backoff.unwrap().attempt, 2, "a second start");
+    }
+
+    #[tokio::test]
+    async fn claims_are_handed_out_oldest_claimable_first() {
+        let test_clock = clock();
+        let store = store(test_clock.clone());
+        store.create_job(two_tile_job()).await.expect("create");
+
+        // Fail the first task so it is requeued to a later claimable_at,
+        // leaving the second task strictly older.
+        let first = store.claim(any("pod-1")).await.unwrap().unwrap();
+        store
+            .fail(FailRequest {
+                lease: Lease {
+                    task_id: first.task_id,
+                    token: first.lease,
+                },
+                reason: "transient".to_string(),
+            })
+            .await
+            .expect("fail");
+
+        let next = store.claim(any("pod-2")).await.unwrap().unwrap();
+        assert_ne!(
+            next.task_id, first.task_id,
+            "the task still at its original claimable_at must come first"
+        );
     }
 }
