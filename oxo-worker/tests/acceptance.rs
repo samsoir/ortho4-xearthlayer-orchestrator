@@ -130,7 +130,8 @@ case "$line" in
   *'"task_type":"overlay"'*)
     for d in "{s}/yOrtho4XP_Overlays/Earth nav data"/*; do echo dsf > "$d/$tile.dsf"; done ;;
   *)
-    mkdir -p "{s}/Tiles/zOrtho4XP_$tile/terrain"
+    mkdir -p "{s}/Tiles/zOrtho4XP_$tile/terrain" "{s}/Tiles/zOrtho4XP_$tile/Earth nav data/+50+000"
+    echo dsf > "{s}/Tiles/zOrtho4XP_$tile/Earth nav data/+50+000/$tile.dsf"
     echo built > "{s}/Tiles/zOrtho4XP_$tile/terrain/tile.ter" ;;
 esac
 echo '{{"outcome":"ok"}}'"#

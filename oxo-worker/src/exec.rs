@@ -55,6 +55,10 @@ pub enum EgressError {
     BadTile(String),
     #[error("deliverable missing: {0}")]
     Missing(PathBuf),
+    #[error(
+        "hollow deliverable for tile {tile}: the staged tree has no .dsf under \"Earth nav data/\""
+    )]
+    HollowDeliverable { tile: String },
     #[error("egress to {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -205,6 +209,21 @@ fn remove_any(p: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether `dir` contains a `.dsf` file at any depth.
+fn has_dsf(dir: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => has_dsf(&p),
+            Ok(t) if t.is_file() => p.extension().is_some_and(|x| x == "dsf"),
+            _ => false,
+        }
+    })
+}
+
 /// Move the task's deliverable from scratch into the target root.
 pub fn egress(task: &ClaimedTask, paths: &ExecPaths) -> Result<(), EgressError> {
     let root = target_root(task).ok_or(EgressError::NoTargetRoot)?;
@@ -232,6 +251,14 @@ pub fn egress(task: &ClaimedTask, paths: &ExecPaths) -> Result<(), EgressError> 
         source,
     };
     let tmp = stage(&src, &dest_dir, &final_name).map_err(io_err)?;
+    // A tile always has exactly one DSF; without one the staged tree is
+    // hollow and must never replace a previous good delivery.
+    if !is_overlay(task) && !has_dsf(&tmp.join("Earth nav data")) {
+        let _ = remove_any(&tmp);
+        return Err(EgressError::HollowDeliverable {
+            tile: task.tile.clone(),
+        });
+    }
     commit(&tmp, &dest_dir.join(&final_name)).map_err(|source| {
         let _ = remove_any(&tmp);
         EgressError::Io {
@@ -517,6 +544,42 @@ mod tests {
             egress(&task(&e, "ortho", "+51+000"), &e.paths),
             Err(EgressError::Missing(_))
         ));
+    }
+
+    fn hollow_ortho(e: &Env) {
+        fabricate_ortho(e);
+        let d = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
+        fs::remove_file(d.join("Earth nav data/+50+000/+51+000.dsf")).unwrap();
+    }
+
+    #[test]
+    fn an_ortho_tile_without_a_dsf_is_refused_and_commits_nothing() {
+        let e = env();
+        hollow_ortho(&e);
+        let r = egress(&task(&e, "ortho", "+51+000"), &e.paths);
+        match r {
+            Err(EgressError::HollowDeliverable { tile }) => assert_eq!(tile, "+51+000"),
+            other => panic!("expected HollowDeliverable, got {other:?}"),
+        }
+        assert!(names(&e.target).is_empty(), "{:?}", names(&e.target));
+        no_temporaries(&e.target);
+    }
+
+    #[test]
+    fn a_hollow_rerun_leaves_a_previous_good_delivery_intact() {
+        let e = env();
+        let good = e.target.join("zOrtho4XP_+51+000");
+        fs::create_dir_all(good.join("Earth nav data/+50+000")).unwrap();
+        fs::write(good.join("Earth nav data/+50+000/+51+000.dsf"), b"good").unwrap();
+        hollow_ortho(&e);
+        let r = egress(&task(&e, "ortho", "+51+000"), &e.paths);
+        assert!(matches!(r, Err(EgressError::HollowDeliverable { .. })));
+        assert_eq!(
+            fs::read(good.join("Earth nav data/+50+000/+51+000.dsf")).unwrap(),
+            b"good"
+        );
+        assert_eq!(names(&e.target), ["zOrtho4XP_+51+000"]);
+        no_temporaries(&e.target);
     }
 
     #[test]
