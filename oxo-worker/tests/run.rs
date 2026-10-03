@@ -74,8 +74,8 @@ impl Env {
                 r#"read -r line
 tile=$(printf '%s' "$line" | sed 's/.*"tile":"\([^"]*\)".*/\1/')
 ls "{s}/Tiles" | wc -l >> "{log}"
-mkdir -p "{s}/Tiles/zOrtho4XP_$tile"
-echo built > "{s}/Tiles/zOrtho4XP_$tile/tile.txt"
+mkdir -p "{s}/Tiles/zOrtho4XP_$tile/terrain"
+echo built > "{s}/Tiles/zOrtho4XP_$tile/terrain/tile.ter"
 echo '{{"outcome":"ok"}}'"#
             ),
         )
@@ -191,7 +191,9 @@ async fn a_recycle_worker_drains_a_two_task_job() {
     worker.abort();
 
     for tile in ["+50-002", "+51-002"] {
-        let f = env.target().join(format!("zOrtho4XP_{tile}/tile.txt"));
+        let f = env
+            .target()
+            .join(format!("zOrtho4XP_{tile}/terrain/tile.ter"));
         assert_eq!(std::fs::read_to_string(f).unwrap().trim(), "built");
     }
     let log = std::fs::read_to_string(env.root().join("leftovers.log")).unwrap();
@@ -389,8 +391,8 @@ async fn a_slow_stdout_drain_never_turns_success_into_failure() {
         "slow.sh",
         &format!(
             r#"read -r line
-mkdir -p "{s}/Tiles/zOrtho4XP_+50-002"
-echo built > "{s}/Tiles/zOrtho4XP_+50-002/tile.txt"
+mkdir -p "{s}/Tiles/zOrtho4XP_+50-002/terrain"
+echo built > "{s}/Tiles/zOrtho4XP_+50-002/terrain/tile.ter"
 sleep 0.3 &
 echo '{{"outcome":"ok"}}'"#
         ),

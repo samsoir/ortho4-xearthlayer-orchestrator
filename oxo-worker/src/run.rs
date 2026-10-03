@@ -79,7 +79,6 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
     let paths = ExecPaths {
         scratch: PathBuf::from(&config.scratch_dir),
         content: PathBuf::from(&config.content_dir),
-        patches_link: PathBuf::from(&config.patches_link),
     };
     for (what, dir) in [("scratch", &paths.scratch), ("content", &paths.content)] {
         if !dir.is_dir() {
