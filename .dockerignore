@@ -1,0 +1,5 @@
+# Keep the builder stage's `COPY . .` small: no build artifacts or history.
+target/
+.git/
+.superpowers/
+docs/
