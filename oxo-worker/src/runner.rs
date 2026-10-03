@@ -54,24 +54,24 @@ pub fn parse_result(stdout: &str) -> Option<RunnerResult> {
 
 /// Combine exit status and stdout into a verdict.
 pub fn judge(code: Option<i32>, stdout: &str) -> RunOutcome {
+    let fail = |reason: String| RunOutcome::Failed {
+        reason,
+        phase: None,
+    };
     match (code, parse_result(stdout)) {
         (Some(0), Some(RunnerResult::Ok)) => RunOutcome::Success,
         (_, Some(RunnerResult::Failed { reason, phase })) => RunOutcome::Failed {
             reason,
             phase: Some(phase),
         },
-        (Some(0), None) => RunOutcome::Failed {
-            reason: "runner exited 0 without a result line".into(),
-            phase: None,
-        },
-        (Some(c), _) => RunOutcome::Failed {
-            reason: format!("runner exited {c} without a result line"),
-            phase: None,
-        },
-        (None, _) => RunOutcome::Failed {
-            reason: "runner killed by signal".into(),
-            phase: None,
-        },
+        (Some(c), Some(RunnerResult::Ok)) => {
+            fail(format!("runner exited {c} despite reporting ok"))
+        }
+        (None, Some(RunnerResult::Ok)) => {
+            fail("runner killed by signal despite reporting ok".into())
+        }
+        (Some(c), None) => fail(format!("runner exited {c} without a result line")),
+        (None, None) => fail("runner killed by signal".into()),
     }
 }
 
@@ -194,6 +194,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn large_stdout_is_drained_without_deadlock_or_truncation() {
+        assert_eq!(run("stub-runner-noisy.sh").await, RunOutcome::Success);
+    }
+
+    #[tokio::test]
     async fn input_arrives_as_one_json_line_on_stdin() {
         match run("stub-runner-echo.sh").await {
             RunOutcome::Failed { reason, .. } => {
@@ -232,6 +237,32 @@ mod tests {
             }
         );
         assert!(matches!(judge(Some(0), "junk"), RunOutcome::Failed { .. }));
+        let ok = r#"{"outcome":"ok"}"#;
+        let failed = r#"{"outcome":"failed","reason":"r","phase":"p"}"#;
+        assert_eq!(
+            judge(Some(3), ok),
+            RunOutcome::Failed {
+                reason: "runner exited 3 despite reporting ok".into(),
+                phase: None
+            }
+        );
+        assert_eq!(
+            judge(None, ok),
+            RunOutcome::Failed {
+                reason: "runner killed by signal despite reporting ok".into(),
+                phase: None
+            }
+        );
+        // last line wins, in both orders
+        let failed_outcome = RunOutcome::Failed {
+            reason: "r".into(),
+            phase: Some("p".into()),
+        };
+        assert_eq!(judge(Some(0), &format!("{ok}\n{failed}\n")), failed_outcome);
+        assert_eq!(
+            judge(Some(0), &format!("{failed}\n{ok}\n")),
+            RunOutcome::Success
+        );
         // exit 0 but a failed line is still a failure
         assert!(matches!(
             judge(Some(0), r#"{"outcome":"failed","reason":"r","phase":"p"}"#),
