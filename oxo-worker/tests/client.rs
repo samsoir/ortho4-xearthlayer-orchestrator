@@ -84,12 +84,19 @@ async fn a_claim_returns_the_task_with_its_config_intact() {
         .await
         .expect("claim")
         .expect("a task");
-    assert_eq!(task.tile, "+50-002");
-    assert_eq!(task.task_type, "ortho");
+    // Same-instant tasks are claimed in UUID tie-break order, so which
+    // tile arrives is not specified; the job-wide config is.
+    assert!(
+        ["+50-002", "+51-002"].contains(&task.tile.as_str()),
+        "{}",
+        task.tile
+    );
+    assert!(["ortho", "overlay"].contains(&task.task_type.as_str()));
     assert_eq!(task.attempt, 1);
-    assert_eq!(task.config["provider"], "BI");
-    assert_eq!(task.config["zoom"], 16);
-    assert_eq!(task.config["target_root"], "/srv/oxo/artifacts/NA");
+    assert_eq!(
+        task.config,
+        serde_json::json!({"v": 1, "provider": "BI", "zoom": 16, "raw": {}, "target_root": "/srv/oxo/artifacts/NA"})
+    );
 }
 
 #[tokio::test]
