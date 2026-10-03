@@ -1535,6 +1535,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "cucumber",
  "oxo-control",
  "oxo-tasks",
  "reqwest",

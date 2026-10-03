@@ -26,3 +26,8 @@ axum = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
+cucumber = "0.20.2"
+
+[[test]]
+name = "acceptance"
+harness = false
