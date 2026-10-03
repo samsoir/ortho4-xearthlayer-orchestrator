@@ -77,8 +77,8 @@ image: ## Build the worker pod image (podman)
 .PHONY: worker-smoke
 worker-smoke: image ## Run the runner's fake-O4 success case inside the image
 	d=$$(mktemp -d) && cp -r oxo-worker/tests/fixtures/fake_o4 $$d/install && chmod -R a+rwX $$d && \
-	printf '{"tile":"+50-002","task_type":"ortho","config":{"v":1,"provider":"BI","zoom":16,"raw":{},"target_root":"/x"},"install_root":"/fake","overlay_src":"/xp"}' > $$d/in; \
-	podman run --rm -i --network none -v $$d/install:/fake --entrypoint python3 oxo-worker:dev /opt/oxo/oxo_o4_runner.py < $$d/in > $$d/out; \
+	printf '{"tile":"+50-002","task_type":"ortho","config":{"v":2,"provider":"BI","zoom":16,"raw":{},"target_root":"/x","skip_converts":true},"install_root":"/fake","overlay_src":"/xp","app_overrides":{}}' > $$d/in; \
+	podman run --rm -i --network none -v $$d/install:/fake --entrypoint /opt/oxo/oxo_o4_runner.py oxo-worker:dev < $$d/in > $$d/out; \
 	status=$$?; cat $$d/out; \
 	if [ $$status -eq 0 ] && tail -n 1 $$d/out | grep -q '"outcome": "ok"'; then rm -rf $$d; echo 'worker-smoke: ok'; \
 	else rm -rf $$d; echo "worker-smoke: FAILED (exit $$status)" >&2; exit 1; fi

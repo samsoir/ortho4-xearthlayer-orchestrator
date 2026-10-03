@@ -203,6 +203,47 @@ async fn a_recycle_worker_drains_a_two_task_job() {
     );
 }
 
+/// Pins only that the supervisor spawns a runner by bare path (shebang +
+/// exec bit, no interpreter prefix). It uses its own temp script, so it
+/// says nothing about the checked-in runner's mode; that is guarded by
+/// `the_checked_in_runner_is_directly_executable` in runner_contract.rs.
+#[tokio::test]
+async fn a_bare_path_shebang_runner_spawns_and_completes_a_task() {
+    let env = env_with(|s| {
+        s.replace(
+            r#"tiles = ["+50-002", "+51-002"]"#,
+            r#"tiles = ["+50-002"]"#,
+        )
+    })
+    .await;
+    let scratch = env.scratch().display().to_string();
+    let runner = env.root().join("runner.py");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys
+tile = json.loads(sys.stdin.readline())["tile"]
+d = "{scratch}/Tiles/zOrtho4XP_" + tile
+os.makedirs(d + "/terrain")
+os.makedirs(d + "/Earth nav data/+50+000")
+open(d + "/Earth nav data/+50+000/" + tile + ".dsf", "w").write("dsf")
+open(d + "/terrain/tile.ter", "w").write("built")
+print(json.dumps({{"outcome": "ok"}}))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = env.config(&runner.to_string_lossy(), "stop", 0);
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::TaskDone
+    );
+    assert_eq!(env.job_state().await["state"], "complete");
+}
+
 #[tokio::test]
 async fn stop_mode_takes_exactly_one_task() {
     let env = env_with(|s| s).await;

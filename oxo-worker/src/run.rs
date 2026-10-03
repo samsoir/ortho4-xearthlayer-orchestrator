@@ -102,6 +102,11 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
     }
 
     let worker = config.worker_name();
+    tracing::info!(
+        "worker {worker} polling {} mode {:?}",
+        config.control_plane_url,
+        config.mode
+    );
     loop {
         // A probe that fails is treated as no room: claim only the work
         // that needs none.
@@ -129,6 +134,13 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
                 tokio::time::sleep(deps.poll_interval).await;
             }
             Ok(Some(task)) => {
+                tracing::info!(
+                    "claimed task {} {} {} attempt {}",
+                    task.task_id,
+                    task.task_type,
+                    task.tile,
+                    task.attempt
+                );
                 let settled = work(config, client, &deps, &paths, &task).await;
                 if let Err(e) = exec::cleanup(&paths.scratch) {
                     tracing::error!(error = %e, "cleanup failed; scratch is not clean");
@@ -180,7 +192,10 @@ async fn work(
                     Ok(()) => {}
                     Err(ApiFailure::LeaseGone(why)) => {
                         // Not ours any more: stop the build, say nothing.
-                        tracing::warn!(task = %task.task_id, %why, "lease lost; killing runner");
+                        tracing::warn!(
+                            task = %task.task_id, %why,
+                            "lease lost for task {}; killed runner, no report", task.task_id
+                        );
                         if let Err(e) = run.kill_and_reap().await {
                             tracing::error!(error = %e, "could not reap the runner");
                         }
@@ -219,7 +234,7 @@ async fn work(
 }
 
 async fn report_complete(client: &ControlPlane, deps: &Deps, task: &ClaimedTask) -> Settled {
-    report(deps, task, "complete", || {
+    report(deps, task, "complete", None, || {
         client.complete(task.task_id, task.lease_token)
     })
     .await
@@ -231,7 +246,7 @@ async fn report_fail(
     task: &ClaimedTask,
     reason: &str,
 ) -> Settled {
-    report(deps, task, "fail", || async {
+    report(deps, task, "fail", Some(reason), || async {
         client
             .fail(task.task_id, task.lease_token, reason)
             .await
@@ -242,14 +257,28 @@ async fn report_fail(
 
 /// A report with bounded retries. A 409 means the lease is gone and there
 /// is nothing left to say.
-async fn report<F, Fut>(deps: &Deps, task: &ClaimedTask, verb: &str, call: F) -> Settled
+async fn report<F, Fut>(
+    deps: &Deps,
+    task: &ClaimedTask,
+    verb: &str,
+    detail: Option<&str>,
+    call: F,
+) -> Settled
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<(), ApiFailure>>,
 {
     for attempt in 1..=REPORT_ATTEMPTS {
         match call().await {
-            Ok(()) => return Settled::Done,
+            Ok(()) => {
+                match detail {
+                    Some(reason) => {
+                        tracing::info!("failed task {}: {reason}", task.task_id)
+                    }
+                    None => tracing::info!("completed task {}", task.task_id),
+                }
+                return Settled::Done;
+            }
             Err(ApiFailure::LeaseGone(_)) => return Settled::Done,
             Err(ApiFailure::Fatal(status, body)) => {
                 tracing::error!(status, %body, verb, "report refused");

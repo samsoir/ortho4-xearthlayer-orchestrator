@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
 rustix = { workspace = true, features = ["process"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

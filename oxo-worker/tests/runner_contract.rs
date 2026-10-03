@@ -615,3 +615,39 @@ fn patch_absence_is_logged_when_the_tile_has_none() {
         o.stderr
     );
 }
+
+/// Why `path` cannot be exec'd directly as the supervisor does, if so.
+fn exec_defect(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    if mode & 0o111 == 0 {
+        return Some(format!("mode {mode:o} has no exec bit"));
+    }
+    let text = std::fs::read_to_string(path).unwrap();
+    if text.lines().next() != Some("#!/usr/bin/env python3") {
+        return Some("missing shebang: first line is not `#!/usr/bin/env python3`".into());
+    }
+    None
+}
+
+/// The supervisor execs the runner directly, so the checked-in file must
+/// carry the exec bit and its shebang (the first end-to-end run died with
+/// EACCES on a mode 644 runner).
+#[test]
+fn the_checked_in_runner_is_directly_executable() {
+    let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/oxo_o4_runner.py");
+    assert_eq!(exec_defect(&runner), None);
+}
+
+#[test]
+fn the_exec_guard_bites_on_a_644_copy_and_a_lost_shebang() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("r.py");
+    std::fs::write(&p, "#!/usr/bin/env python3\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(exec_defect(&p).unwrap().contains("exec bit"));
+    std::fs::write(&p, "print(1)\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(exec_defect(&p).unwrap().contains("shebang"));
+}
