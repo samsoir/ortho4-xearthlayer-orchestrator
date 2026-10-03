@@ -373,7 +373,11 @@ be per-region intent.
   numbers exist; a footprint column and claim predicate remain additive.
 - **Texture-bytes sanity floor.** A floor on texture bytes before egress
   remains the only detector for the bad-provider silently-degraded success
-  (pod-contract section g); deferred.
+  (pod-contract section g); deferred. The DSF-presence half of the
+  sanity check is implemented: ortho egress fails with
+  `HollowDeliverable` when the staged tree has no `.dsf` under
+  `Earth nav data/`, before commit, so a hollow re-run never replaces a
+  previous good delivery. The texture-bytes floor remains open.
 
 ## Out of scope
 
