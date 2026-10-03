@@ -40,8 +40,9 @@ The settings an operator most often touches:
 | `OXO_MODE` | `recycle` | `recycle` cleans scratch and takes the next task; `stop` performs one task and exits. |
 | `OXO_MIN_FREE_SCRATCH_BYTES` | 8 GiB | A ZL16 floor (peak observed scratch 3.33 GiB). Raise it when producing above ZL16: ZL17 projects to about 13 GiB. |
 
-The pod spec requests 6 GiB of memory and limits it at 8 GiB: the measured budget for a ZL16 ortho worker.
-Both numbers, and their basis, are in `docs/specs/2026-10-02-ortho4xp-pod-contract.md`, section (h).
+The pod spec requests 6 GiB of memory: the documented budget for a ZL16 ortho worker (measured peak 4.81 GiB), in
+`docs/specs/2026-10-02-ortho4xp-pod-contract.md`, section (h). The 8 GiB limit is chosen headroom above that
+measured peak, not a documented figure.
 
 ## Tools, never data
 

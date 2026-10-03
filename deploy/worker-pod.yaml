@@ -17,7 +17,9 @@ metadata:
     app: oxo-worker
 spec:
   # Mode recycle keeps the pod alive across tasks; the platform restarts it if
-  # it exits (stop mode exits after one task).
+  # it exits. Caveat: a stop-mode worker is then restarted and claims again,
+  # so stop + Always is recycle with a fresh process per task. A true one-shot
+  # needs restartPolicy Never/OnFailure or a Kubernetes Job.
   restartPolicy: Always
   containers:
     - name: worker
@@ -39,7 +41,9 @@ spec:
         #   poll and heartbeat intervals
       # Sizing from docs/specs/2026-10-02-ortho4xp-pod-contract.md section (h):
       # memory budget >= 6 GiB per ortho worker. Basis: measured heavy-tile
-      # ZL16 ortho. Re-measure before producing above ZL16.
+      # ZL16 ortho (measured peak 4.81 GiB). Re-measure above ZL16.
+      # The 6Gi REQUEST is that documented budget. The 8Gi LIMIT is chosen
+      # headroom above the measured peak, not a figure from the document.
       resources:
         requests:
           memory: "6Gi"
