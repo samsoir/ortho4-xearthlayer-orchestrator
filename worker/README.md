@@ -17,18 +17,30 @@
 |---|---|---|
 | `/var/oxo/scratch` | scratch | `tmp`, `OSM_data`, `Orthophotos`, `Masks`, `Geotiffs`, `Tiles`, `yOrtho4XP_Overlays` (each a symlink from `/opt/ortho4xp/<dir>` to `/var/oxo/scratch/<dir>`) |
 | `/var/oxo/dem` | dem-cache | `Elevation_data` |
-| `/var/oxo/content` | content (read-only) | consumed via config, never symlinked: the X-Plane data (`custom_overlay_src`) and `patches/<set>/…` |
+| `/var/oxo/content` | content (read-only) | consumed via config, never symlinked: the X-Plane data (`custom_overlay_src`) |
+| `/var/oxo/patches-active` | patches (read-only) | the target of the image's `Patches` symlink (see below) |
 | *(artifacts mount)* | artifacts | no symlink — egress is the supervisor's explicit copy, and the operator mounts it so each region's `target_root` exists |
 
-`Patches` is also a symlink, to `/var/oxo/patches-active`, which the supervisor points at
-`/var/oxo/content/patches/<set>` per task — an indirection so the read-only content mount never needs to be writable.
+## Patches
+
+Patches are always on. `/opt/ortho4xp/Patches` is a symlink to `/var/oxo/patches-active`, a read-only mount whose
+layout is flat and per-tile, Ortho4XP's own, matched by tile coordinate. There is no per-task selector and no set
+name; an empty tree means no patches. The runner logs `patches: present|none for <tile>` for every task, so whether
+a tile was patched is visible in the worker log.
+
+## The deliverable
+
+Per tile, about 64 MB: the DSF, the terrain descriptors and the mask PNGs (measured in the pod contract, "Addendum:
+the deliverable under skip_converts"). `skip_converts` defaults to true in the region spec and travels in the task
+payload (v2). The imagery jpegs and all intermediates are perishable: they live in scratch and are wiped on cleanup,
+and only the artifacts copy persists.
 
 ## Run it
 
 1. Build the image: `make image` (produces `oxo-worker:dev`).
 2. Prepare the mounts per the table above: a scratch volume, the shared DEM cache, the read-only content tree
-   (X-Plane data and patches), and an artifacts directory mounted at the region's `target_root`.
-3. Edit the `EDIT ME` placeholders in `deploy/worker-pod.yaml` (control-plane URL, the three hostPaths, the
+   (X-Plane data), the read-only patches tree, and an artifacts directory mounted at the region's `target_root`.
+3. Edit the `EDIT ME` placeholders in `deploy/worker-pod.yaml` (control-plane URL, the four hostPaths, the
    artifacts mount path), then `podman kube play deploy/worker-pod.yaml`. `podman kube down deploy/worker-pod.yaml`
    removes it.
 
@@ -38,6 +50,7 @@ The settings an operator most often touches:
 |---|---|---|
 | `OXO_CONTROL_URL` | none, required | Where `oxo-controld` is reachable from inside the pod. |
 | `OXO_MODE` | `recycle` | `recycle` cleans scratch and takes the next task; `stop` performs one task and exits. |
+| `OXO_O4_APP_OVERRIDES` | none (no overrides) | JSON object of Ortho4XP app-level variable names to string values, e.g. `{"max_download_slots":"2","http_timeout":"10.0"}`. Empty string means no overrides. App-level variables are refused in the region spec's raw keys; this is their only home. `deploy/worker-pod.yaml` carries the operator's production values. |
 | `OXO_MIN_FREE_SCRATCH_BYTES` | 8 GiB | A ZL16 floor (peak observed scratch 3.33 GiB). Raise it when producing above ZL16: ZL17 projects to about 13 GiB. |
 
 The pod spec requests 6 GiB of memory: the documented budget for a ZL16 ortho worker (measured peak 4.81 GiB), in
