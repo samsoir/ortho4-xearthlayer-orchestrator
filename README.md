@@ -162,6 +162,12 @@ is written Python, many distributed compute frameworks are written in Go.
 Web/front end should use HTML5, CSS and Javascript that is well structured and
 conforms to modern WCAG design principles.
 
+# Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and standards,
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations, and
+[SECURITY.md](SECURITY.md) for reporting vulnerabilities privately.
+
 # License
 
-MIT License
+Licensed under the MIT License. See [LICENSE](LICENSE) for details.
