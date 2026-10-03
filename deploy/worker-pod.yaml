@@ -1,0 +1,84 @@
+# OXO worker pod (Podman kube play).
+#
+#   1. Build the image:          make image          (produces oxo-worker:dev)
+#   2. Edit every line marked    EDIT ME             below.
+#   3. Start the pod:            podman kube play deploy/worker-pod.yaml
+#      Stop and remove it:       podman kube down deploy/worker-pod.yaml
+#
+# The worker self-initialises, self-checks scratch capacity and claims work
+# from the control plane; this file only supplies the volumes and the URL.
+# Mount-point contract: worker/README.md. Measured numbers:
+# docs/specs/2026-10-02-ortho4xp-pod-contract.md.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oxo-worker
+  labels:
+    app: oxo-worker
+spec:
+  # Mode recycle keeps the pod alive across tasks; the platform restarts it if
+  # it exits. Caveat: a stop-mode worker is then restarted and claims again,
+  # so stop + Always is recycle with a fresh process per task. A true one-shot
+  # needs restartPolicy Never/OnFailure or a Kubernetes Job.
+  restartPolicy: Always
+  containers:
+    - name: worker
+      image: localhost/oxo-worker:dev
+      imagePullPolicy: Never
+      env:
+        # EDIT ME: where the control plane (oxo-controld) is reachable FROM
+        # INSIDE the pod. Not localhost: that is the pod itself.
+        - name: OXO_CONTROL_URL
+          value: "http://CONTROL_HOST:8080"
+        # recycle: clean scratch and take the next task. stop: one task, exit.
+        - name: OXO_MODE
+          value: "recycle"
+        # Deliberately left to their defaults (see oxo-worker/src/config.rs):
+        #   OXO_WORKER_NAME               (derived from the hostname)
+        #   OXO_MIN_FREE_SCRATCH_BYTES    (8 GiB; a ZL16 floor, raise it for
+        #                                  ZL17 and above, see pod-contract (h))
+        #   OXO_OVERLAY_SRC               (/var/oxo/content/xplane)
+        #   poll and heartbeat intervals
+      # Sizing from docs/specs/2026-10-02-ortho4xp-pod-contract.md section (h):
+      # memory budget >= 6 GiB per ortho worker. Basis: measured heavy-tile
+      # ZL16 ortho (measured peak 4.81 GiB). Re-measure above ZL16.
+      # The 6Gi REQUEST is that documented budget. The 8Gi LIMIT is chosen
+      # headroom above the measured peak, not a figure from the document.
+      resources:
+        requests:
+          memory: "6Gi"
+        limits:
+          memory: "8Gi"
+      volumeMounts:
+        - name: scratch
+          mountPath: /var/oxo/scratch
+        - name: dem-cache
+          mountPath: /var/oxo/dem
+        - name: content
+          mountPath: /var/oxo/content
+          readOnly: true
+        # The mount path must equal the region spec's target_root so that
+        # delivery lands where the operator expects.
+        - name: artifacts
+          mountPath: /srv/oxo/artifacts   # EDIT ME to match target_root
+  volumes:
+    # Ephemeral, wiped on cleanup. Needs the scratch floor free (>= 8 GiB at
+    # ZL16, pod-contract (c): peak observed 3.33 GiB). emptyDir lives in the
+    # container storage; swap for a hostPath if that filesystem is small.
+    - name: scratch
+      emptyDir: {}
+    # Shared persistent DEM cache.
+    - name: dem-cache
+      hostPath:
+        path: /EDIT/ME/oxo/dem          # EDIT ME
+        type: DirectoryOrCreate
+    # X-Plane data (custom_overlay_src) and patches/<set>/..., read-only.
+    - name: content
+      hostPath:
+        path: /EDIT/ME/oxo/content      # EDIT ME
+        type: Directory
+    # The deliverable.
+    - name: artifacts
+      hostPath:
+        path: /EDIT/ME/oxo/artifacts    # EDIT ME
+        type: DirectoryOrCreate

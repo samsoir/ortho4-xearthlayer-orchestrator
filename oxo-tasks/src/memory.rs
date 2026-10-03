@@ -57,6 +57,7 @@ struct Job {
     max_attempts: u32,
     backoff: BackoffSeconds,
     task_ids: Vec<TaskId>,
+    worker_payload: String,
 }
 
 #[derive(Debug)]
@@ -197,7 +198,8 @@ impl TaskStore for InMemoryTaskStore {
 
             let same_policy =
                 job.max_attempts == request.max_attempts.get() && job.backoff == request.backoff;
-            if existing != requested || !same_policy {
+            let same_payload = job.worker_payload == request.worker_payload;
+            if existing != requested || !same_policy || !same_payload {
                 return Err(TaskStoreError::JobConflict {
                     region_code: request.region_code,
                     revision: request.revision,
@@ -240,6 +242,7 @@ impl TaskStore for InMemoryTaskStore {
                 max_attempts: request.max_attempts.get(),
                 backoff: request.backoff,
                 task_ids,
+                worker_payload: request.worker_payload,
             },
         );
         state.by_identity.insert(identity, job_id);
@@ -277,6 +280,8 @@ impl TaskStore for InMemoryTaskStore {
         };
 
         let token = LeaseToken::generate();
+        let job_id = state.tasks[&task_id].job_id;
+        let worker_payload = state.jobs[&job_id].worker_payload.clone();
         let task = state
             .tasks
             .get_mut(&task_id)
@@ -295,6 +300,7 @@ impl TaskStore for InMemoryTaskStore {
             tile: task.tile,
             task_type: task.task_type,
             attempt: task.attempts,
+            worker_payload,
         }))
     }
 
@@ -491,6 +497,7 @@ mod tests {
                     task_type: TaskType::Overlay,
                 },
             ],
+            worker_payload: String::new(),
         }
     }
 
@@ -511,6 +518,7 @@ mod tests {
                 tile: tile(50, -2),
                 task_type: TaskType::Ortho,
             }],
+            worker_payload: String::new(),
         }
     }
 

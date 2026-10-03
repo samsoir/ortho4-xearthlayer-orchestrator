@@ -1,0 +1,45 @@
+# worker/Containerfile
+FROM docker.io/library/rust:1-slim AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p oxo-worker
+
+FROM docker.io/library/python:3.12-slim
+
+ARG ORTHO4XP_REPO=https://github.com/Shred86/Ortho4XP.git
+ARG ORTHO4XP_COMMIT=c363134799e8130e1e897ff9064bc53d058f5ba9
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git p7zip-full build-essential libgdal-dev tk \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone ${ORTHO4XP_REPO} /opt/ortho4xp \
+    && git -C /opt/ortho4xp checkout ${ORTHO4XP_COMMIT} \
+    && rm -rf /opt/ortho4xp/.git
+
+# The gdal binding must match the system libgdal, so Debian's version
+# overrides the requirements pin (recorded deviation; see worker/README.md).
+RUN grep -v '^gdal==' /opt/ortho4xp/requirements.txt > /tmp/requirements-no-gdal.txt \
+    && pip install --no-cache-dir -r /tmp/requirements-no-gdal.txt \
+    && pip install --no-cache-dir "gdal==$(gdal-config --version)" \
+    && rm /tmp/requirements-no-gdal.txt
+
+# The install-relative directories Ortho4XP writes are not configurable
+# (O4_File_Names.py resolves them against the cwd), so the image bakes
+# the arrangement: working dirs live on the scratch mount, elevation on
+# the DEM cache, patches behind a supervisor-controlled indirection.
+RUN set -eux; \
+    mkdir -p /var/oxo/scratch /var/oxo/dem /var/oxo/content; \
+    cd /opt/ortho4xp; \
+    for d in tmp OSM_data Orthophotos Masks Geotiffs Tiles yOrtho4XP_Overlays; do \
+        rm -rf "$d"; ln -s "/var/oxo/scratch/$d" "$d"; \
+    done; \
+    rm -rf Elevation_data; ln -s /var/oxo/dem Elevation_data; \
+    rm -rf Patches; ln -s /var/oxo/patches-active Patches
+
+LABEL oxo.ortho4xp-commit=${ORTHO4XP_COMMIT}
+WORKDIR /opt/ortho4xp
+
+COPY --from=builder /src/target/release/oxo-worker /opt/oxo/oxo-worker
+COPY worker/oxo_o4_runner.py /opt/oxo/oxo_o4_runner.py
+ENTRYPOINT ["/opt/oxo/oxo-worker"]

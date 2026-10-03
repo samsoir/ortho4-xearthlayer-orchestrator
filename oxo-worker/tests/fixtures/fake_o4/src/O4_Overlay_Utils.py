@@ -1,0 +1,15 @@
+import os
+from fake_log import enter, rec, ret
+import O4_File_Names as FNAMES
+
+# Owning module of the variable, as in O4_Cfg_Vars (module: OVL).
+custom_overlay_src = ""
+
+
+def build_overlay(lat, lon):
+    enter("build_overlay")
+    d = os.path.join(FNAMES.Overlay_dir, "Earth nav data", FNAMES.round_latlon(lat, lon))
+    rec("blockdir_exists %s" % os.path.isdir(d))
+    rec("cfg overlay_src=" + custom_overlay_src)
+    rec("args %d %d" % (lat, lon))
+    return ret("build_overlay")

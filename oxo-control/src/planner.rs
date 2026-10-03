@@ -3,8 +3,11 @@
 //! 2N tasks from N tiles. `include_overlays = false` yields N ortho tasks
 //! and is a first-class choice, not a degraded mode.
 
+use std::collections::BTreeMap;
+
 use oxo_spec::RegionSpec;
 use oxo_tasks::{BackoffSeconds, CreateJob, InvalidQuantity, MaxAttempts, TaskSpec, TaskType};
+use serde::Serialize;
 use thiserror::Error;
 
 /// Why a specification could not be planned.
@@ -19,6 +22,36 @@ pub enum PlanError {
     MaxAttempts(InvalidQuantity),
     #[error("failure policy backoff_seconds: {0}")]
     Backoff(InvalidQuantity),
+    #[error("worker payload could not be serialised: {0}")]
+    Payload(String),
+}
+
+/// What the worker builds from: the region's intent, snapshotted at
+/// planning time. Field order is the wire order; `raw` is a `BTreeMap`,
+/// so keys are sorted. Together these make the line byte-deterministic,
+/// which the store's resubmission comparison depends on.
+#[derive(Serialize)]
+struct WorkerPayload<'a> {
+    v: u8,
+    provider: &'a str,
+    zoom: u8,
+    raw: &'a BTreeMap<String, String>,
+    target_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patches: Option<&'a str>,
+}
+
+fn compose_payload(spec: &RegionSpec) -> Result<String, PlanError> {
+    let parameters = &spec.parameters;
+    serde_json::to_string(&WorkerPayload {
+        v: 1,
+        provider: &parameters.provider,
+        zoom: parameters.zoom,
+        raw: &parameters.raw,
+        target_root: spec.target.root.to_string_lossy().into_owned(),
+        patches: parameters.patches.as_deref(),
+    })
+    .map_err(|error| PlanError::Payload(error.to_string()))
 }
 
 /// Atomize a validated region specification into a job registration.
@@ -56,6 +89,7 @@ pub fn plan(spec: &RegionSpec) -> Result<CreateJob, PlanError> {
         revision: spec.metadata.revision,
         max_attempts,
         backoff,
+        worker_payload: compose_payload(spec)?,
         tasks,
     })
 }
@@ -87,6 +121,7 @@ mod tests {
                 provider: "BI".to_string(),
                 zoom: 16,
                 include_overlays,
+                patches: None,
                 raw: BTreeMap::new(),
             },
             target: TargetLocation {
@@ -183,5 +218,30 @@ mod tests {
             error,
             PlanError::Backoff(InvalidQuantity::TooManySeconds(_))
         ));
+    }
+
+    #[test]
+    fn the_payload_is_pinned_byte_for_byte_without_patches() {
+        let mut s = spec(&[(50, -2)], false);
+        s.parameters.provider = "GO2".to_string();
+        s.parameters.raw.insert("zl_b".to_string(), "2".to_string());
+        s.parameters.raw.insert("zl_a".to_string(), "1".to_string());
+        let job = plan(&s).expect("plan");
+        assert_eq!(
+            job.worker_payload,
+            r#"{"v":1,"provider":"GO2","zoom":16,"raw":{"zl_a":"1","zl_b":"2"},"target_root":"/srv/oxo/artifacts/NA"}"#
+        );
+    }
+
+    #[test]
+    fn the_payload_is_pinned_byte_for_byte_with_patches_and_empty_raw() {
+        let mut s = spec(&[(50, -2)], false);
+        s.parameters.provider = "GO2".to_string();
+        s.parameters.patches = Some("na-airports".to_string());
+        let job = plan(&s).expect("plan");
+        assert_eq!(
+            job.worker_payload,
+            r#"{"v":1,"provider":"GO2","zoom":16,"raw":{},"target_root":"/srv/oxo/artifacts/NA","patches":"na-airports"}"#
+        );
     }
 }

@@ -213,6 +213,7 @@ publishes a desired state for the platform to converge on.
 | `scratch` | Ephemeral, per pod | All intermediate work. Wiped wholesale on cleanup. |
 | `artifacts` | Durable | Finished ortho tiles (`zOrtho4XP_<tile>/`) and overlays (`yOrtho4XP_Overlays/`). The egress target and the v1 deliverable: the operator points existing packaging tools at it. |
 | `dem-cache` | Persistent, shared | Elevation data, which covers more area than one 1x1 degree tile and is therefore worth retaining across tasks and pods. |
+| `content` | Read-only, shared | **Added 2026-10-02 by the worker pod design.** Source material the build consumes but never produces: the X-Plane Global Scenery / demo data that overlay extraction reads (`custom_overlay_src`), and the patches tree that region specifications select from by name. Exists because the image carries tools, never data — this content is large and deployment-specific, so it reaches the pod as a mount whose backing store (local disk, NAS, bucket driver) OXO never sees. |
 
 Working on scratch rather than directly on the durable volume keeps
 Ortho4XP's heavy intermediate I/O local, makes cleanup trivially
@@ -374,7 +375,12 @@ interface.
   property of the pod spec and its deployment, or of the region
   specification that the work belongs to. The former makes it an
   operational tuning knob; the latter makes it part of the
-  reproducible definition of a package.
+  reproducible definition of a package. **Amended 2026-10-02: settled
+  by the worker pod design** — it is a pod-level operational knob (an
+  environment variable in the pod spec). With region intent travelling
+  on the task itself, nothing regional remains in the mode: `recycle`
+  suits a long-lived Podman pod, `stop` suits a Kubernetes Job, and the
+  region's reproducible definition is untouched by either.
 - **Where the Ortho4XP build is pinned.** Workers must agree on a
   version, and version skew is a recorded failure mode of the manual
   process. Whether OXO asserts provenance or merely records it is open.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control", "oxo-controld"]
+members = ["oxo-spec", "oxo-spec-cli", "oxo-tasks", "oxo-tasks-postgres", "oxo-control", "oxo-controld", "oxo-worker"]
 resolver = "2"
 
 [workspace.package]
@@ -25,3 +25,6 @@ http-body-util = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"
+rustix = { version = "1", features = ["fs"] }

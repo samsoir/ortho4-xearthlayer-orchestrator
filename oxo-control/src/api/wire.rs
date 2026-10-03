@@ -2,9 +2,11 @@
 //! non-Rust worker parses; tests pin the exact strings.
 
 use chrono::{DateTime, Utc};
-use oxo_tasks::{ClaimedTask, FailOutcome, JobCreated, JobStatus, Throughput};
+use oxo_tasks::{ClaimedTask, FailOutcome, JobCreated, JobStatus, TaskStoreError, Throughput};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::api::error::ApiError;
 
 /// Response to submitting a specification.
 #[derive(Debug, Serialize)]
@@ -106,18 +108,28 @@ pub struct ClaimedTaskBody {
     pub tile: String,
     pub task_type: String,
     pub attempt: u32,
+    /// The region's production intent, parsed from the job's payload.
+    pub config: serde_json::Value,
 }
 
-impl From<ClaimedTask> for ClaimedTaskBody {
-    fn from(value: ClaimedTask) -> Self {
-        Self {
+impl TryFrom<ClaimedTask> for ClaimedTaskBody {
+    type Error = ApiError;
+
+    fn try_from(value: ClaimedTask) -> Result<Self, ApiError> {
+        // The payload is opaque to the store but composed by `plan`, so
+        // bytes that do not parse are an operational fault (503), not a
+        // client one.
+        let config = serde_json::from_str(&value.worker_payload)
+            .map_err(|error| ApiError::Store(TaskStoreError::Adapter(error.to_string())))?;
+        Ok(Self {
             task_id: value.task_id.as_uuid(),
             job_id: value.job_id.as_uuid(),
             lease_token: value.lease.as_uuid(),
             tile: value.tile.to_string(),
             task_type: value.task_type.as_str().to_string(),
             attempt: value.attempt,
-        }
+            config,
+        })
     }
 }
 
@@ -205,8 +217,11 @@ mod tests {
             tile: TileId::new(50, -2).expect("in range"),
             task_type: TaskType::Overlay,
             attempt: 1,
+            worker_payload:
+                r#"{"v":1,"provider":"GO2","zoom":16,"raw":{"a":"b"},"target_root":"/t"}"#
+                    .to_string(),
         };
-        let body = serde_json::to_value(ClaimedTaskBody::from(claimed)).unwrap();
+        let body = serde_json::to_value(ClaimedTaskBody::try_from(claimed).unwrap()).unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -216,7 +231,26 @@ mod tests {
                 "tile": "+50-002",
                 "task_type": "overlay",
                 "attempt": 1,
+                "config": {"v": 1, "provider": "GO2", "zoom": 16, "raw": {"a": "b"}, "target_root": "/t"},
             })
+        );
+    }
+
+    #[test]
+    fn a_payload_the_store_hands_back_unparseable_is_an_adapter_fault() {
+        let claimed = ClaimedTask {
+            task_id: TaskId::generate(),
+            job_id: JobId::generate(),
+            lease: LeaseToken::generate(),
+            tile: TileId::new(50, -2).expect("in range"),
+            task_type: TaskType::Ortho,
+            attempt: 1,
+            worker_payload: "not json".to_string(),
+        };
+        let error = ClaimedTaskBody::try_from(claimed).expect_err("refuse");
+        assert!(
+            matches!(error, ApiError::Store(TaskStoreError::Adapter(_))),
+            "{error:?}"
         );
     }
 
