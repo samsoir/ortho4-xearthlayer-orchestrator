@@ -95,7 +95,7 @@ async fn a_claim_returns_the_task_with_its_config_intact() {
     assert_eq!(task.attempt, 1);
     assert_eq!(
         task.config,
-        serde_json::json!({"v": 1, "provider": "BI", "zoom": 16, "raw": {}, "target_root": "/srv/oxo/artifacts/NA"})
+        serde_json::json!({"v": 2, "provider": "BI", "zoom": 16, "raw": {}, "target_root": "/srv/oxo/artifacts/NA", "skip_converts": true})
     );
 }
 

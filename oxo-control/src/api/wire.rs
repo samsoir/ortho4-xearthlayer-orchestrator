@@ -218,7 +218,7 @@ mod tests {
             task_type: TaskType::Overlay,
             attempt: 1,
             worker_payload:
-                r#"{"v":1,"provider":"GO2","zoom":16,"raw":{"a":"b"},"target_root":"/t"}"#
+                r#"{"v":2,"provider":"GO2","zoom":16,"raw":{"a":"b"},"target_root":"/t","skip_converts":true}"#
                     .to_string(),
         };
         let body = serde_json::to_value(ClaimedTaskBody::try_from(claimed).unwrap()).unwrap();
@@ -231,7 +231,7 @@ mod tests {
                 "tile": "+50-002",
                 "task_type": "overlay",
                 "attempt": 1,
-                "config": {"v": 1, "provider": "GO2", "zoom": 16, "raw": {"a": "b"}, "target_root": "/t"},
+                "config": {"v": 2, "provider": "GO2", "zoom": 16, "raw": {"a": "b"}, "target_root": "/t", "skip_converts": true},
             })
         );
     }

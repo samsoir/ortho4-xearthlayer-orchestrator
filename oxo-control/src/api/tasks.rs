@@ -134,11 +134,12 @@ mod tests {
         assert_eq!(
             body["config"],
             json!({
-                "v": 1,
+                "v": 2,
                 "provider": "BI",
                 "zoom": 16,
                 "raw": {},
                 "target_root": "/srv/oxo/artifacts/NA",
+                "skip_converts": true,
             })
         );
     }
