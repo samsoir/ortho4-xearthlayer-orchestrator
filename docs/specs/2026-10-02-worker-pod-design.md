@@ -29,7 +29,9 @@ point that imports the `O4_*` modules; heartbeating during builds; lease
 loss handling; artifact egress; wholesale scratch cleanup; recycle and
 stop modes; the pod spec; the configuration surfaces (pod layer and task
 layer); the port and wire amendments that carry per-task configuration;
-the small `oxo-spec` amendment for the patches selector.
+the small `oxo-spec` amendment (originally a patches selector; superseded
+by the operator-conventions amendment below — now the `skip_converts`
+escape hatch).
 
 Out: scaling automation (the throughput contract stays open for it);
 operator UI (sub-project 5); packaging/publishing (the operator's,
@@ -105,7 +107,7 @@ deployment topology OXO never sees.
 | `scratch` | Ortho4XP's working directories. Wiped wholesale after every task. | read-write, ephemeral |
 | `artifacts` | The deliverable. Mounted so that each region's `target.root` exists inside the pod. | read-write, durable |
 | `dem-cache` | Mounted at Ortho4XP's fixed `Elevation_data` location. The deliberate exception to statelessness. | read-write, shared |
-| `content` | Read-only source material: the X-Plane Global Scenery / demo data (the overlay source) and the patches tree (`patches/<set>/<tile>/…`). | read-only, shared |
+| `content` | Read-only source material: the X-Plane Global Scenery / demo data (the overlay source) and the patches tree — **flat per-tile** (`patches/<tile>/…`), Ortho4XP's own layout, mounted whole at the image's fixed `Patches` location (amended below). | read-only, shared |
 
 Ortho4XP's directory layout is install-relative and fixed
 (`O4_File_Names.py`: `Patch_dir`, `Elevation_dir`, `OSM_dir`,
@@ -135,7 +137,7 @@ claim through the task store (next section). Its fields:
   "zoom": 16,
   "raw": { "cover_airports_with_highres": "ICAO" },
   "target_root": "/srv/oxo/artifacts/NA",
-  "patches": "na-airports"
+  "skip_converts": true
 }
 ```
 
@@ -147,12 +149,16 @@ claim through the task store (next section). Its fields:
   homogeneous platform is what makes identical in-container paths
   reasonable. The supervisor verifies it exists and is writable *before*
   the build and fails the task loudly if not — not after six hours.
-- `patches` — optional selector naming a subdirectory of the content
-  volume's patches tree. Before the build the supervisor links the
-  selected set to Ortho4XP's fixed `Patches/` location (and clears the
-  link when unset). Ortho4XP then finds `Patches/<tile>/…` by its own
-  `patch_dir(lat, lon)` lookup. Bytes stay on the volume; the payload
-  carries only a name. Two regions may patch the same tile differently.
+- `skip_converts` — whether Ortho4XP's jpeg→DDS conversion is skipped.
+  Defaults to **true**: XEarthLayer generates DDS at runtime, so
+  converting at build time wastes hours and gigabytes producing data
+  XEL ignores. The escape hatch to `false` exists for testing and for
+  producing conventional (non-XEL) scenery; it applies to every tile in
+  the region. An app-level Ortho4XP variable (`module: TILE`), applied
+  by the runner to its owning module. *(This bullet replaced the
+  original per-region `patches` selector — superseded by the
+  operator-conventions amendment below: patches are always-on at pod
+  level, as in Ortho4XP's own distribution.)*
 - `v` — the payload schema version. The payload outlives control-plane
   deployments (it is persisted), so it versions itself rather than
   borrowing the API path's version.
@@ -190,14 +196,15 @@ Wire: `POST /api/v1/jobs` composes the payload from the submitted
 specification; the claim response's `config` field embeds it. The wire
 tests pin the shape exactly, as they do every other body.
 
-## `oxo-spec` amendment: the patches selector
+## `oxo-spec` amendment: `skip_converts`
 
-`parameters.patches: Option<String>`, the first change to `oxo-spec`
-since it shipped. Validation: when present, non-empty, a single path
-component (no separators, no `..`), from a conservative character set.
-Absent means no patches, which stays the common case. Additive and
-optional, so every existing specification remains valid; the CLI and
-serialisation pick it up through the existing derive path.
+**Superseded (2026-10-02, operator conventions):** the original
+amendment here was a per-region `patches` selector; it shipped and was
+then removed when patches became always-on at pod level (below). The
+spec amendment that stands is `parameters.skip_converts: bool`,
+defaulting to `true` (the XEL invariant), overridable per region as an
+escape hatch for testing and non-XEL scenery production. No validation
+rule needed — both values are meaningful.
 
 ## The supervisor's loop
 
@@ -209,7 +216,8 @@ start → validate mounts → loop:
     422/4xx → log, exit 2 (misconfiguration — do not spin)
     503 → sleep, retry (the one retryable status, per the worker rule)
     200 → run the task:
-      verify target_root writable; link patches; (overlay) pre-create the
+      verify target_root writable; log whether Patches/<tile> exists
+        (patch skipping must never be silent again); (overlay) pre-create the
         10° block output directory idempotently — Ortho4XP's own check is
         the recorded TOCTOU race; never rely on it
       spawn runner with the task JSON on stdin
@@ -255,14 +263,21 @@ anything — reporting and cleanup belong to the supervisor.
 
 The build writes into scratch (via the install's fixed directories).
 After a successful run the supervisor moves the deliverable into
-`target_root`: the ortho tile's `zOrtho4XP_<tile>/` directory, or the
-overlay's DSF into the shared `yOrtho4XP_Overlays/Earth nav data/<10°
-block>/` tree. Moves are copy-to-temporary-then-rename within the
-artifacts filesystem, so a crash mid-egress never leaves a half-written
-file under a final name; the overlay block directory is created
-idempotently on the artifacts side too, for the same reason as on the
-scratch side. Exact source paths are confirmed by the spike before the
-egress code is written.
+`target_root`. **Amended (operator conventions): the ortho deliverable
+is the XEL tile, not the whole build directory** — `Earth nav data/**`
+(the DSF), `terrain/**` (the `.ter` descriptors) and the mask `.png`s,
+nothing else. The downloaded jpegs, the `Data*` mesh/poly/alt
+intermediates and the per-tile `Ortho4XP_<tile>.cfg` are perishable and
+die with the scratch wipe: XEarthLayer streams imagery and generates
+DDS at runtime, so everything except the cached DEM is disposable once
+a tile compiles (~60 MB shipped instead of ~2.6 GiB). The overlay
+deliverable is unchanged: the DSF into the shared
+`yOrtho4XP_Overlays/Earth nav data/<10° block>/` tree. Moves are
+copy-to-temporary-then-rename within the artifacts filesystem, so a
+crash mid-egress never leaves a half-written file under a final name;
+the overlay block directory is created idempotently on the artifacts
+side too. The exact file set under `skip_converts=true` is confirmed by
+a targeted probe before the egress filter is written.
 
 ## Testing
 
@@ -299,12 +314,41 @@ egress code is written.
 | Payload in idempotency | A differing payload is `JobConflict` | Resuming under silently-changed parameters is the lie `JobConflict` exists to prevent; closes a real hole. |
 | Image contents | Tools, never data | Global Scenery and friends are large and deployment-specific (operator ruling); everything reaches the pod as mounts whose backing store OXO never sees. |
 | Supervisor language | Rust binary driving a Python runner subprocess | Ortho4XP exits 0 on failure, so the reliable layer must own the process; Python only where the `O4_*` imports force it. |
-| Patches | Spec names a set; supervisor links it to the fixed `Patch_dir`; bytes on the content volume | `Patch_dir` is not configurable in Ortho4XP (verified); linking per task gives region-scoped patches without content in the store. |
+| Patches | **Amended (operator conventions):** always-on at pod level — the content volume's flat per-tile patches tree mounts read-only at the image's fixed `Patches` location; Ortho4XP matches by coordinate, as in its own distribution. The per-region selector is removed. The worker logs per task whether `Patches/<tile>` exists. | The operator's convention is Ortho4XP's own; and the selector's flexibility paid for machinery nobody needed. The presence log exists because `O4_Vector_Map` silently skips a missing patch dir — verified to have silently skipped the production frameworks' block-nested patches, which no code in the estate ever read. |
+| `skip_converts` | Region-level spec field, default `true`, payload-carried, runner-applied to its owning module | XEL generates DDS at runtime (the invariant); the escape hatch serves testing and non-XEL scenery (operator ruling). |
+| The deliverable | DSF + `.ter` + mask `.png`s only; everything else perishable except the DEM cache | Operator ruling: XEL streams imagery; shipping the build directory wasted ~2.5 GiB/tile of data XEL ignores. |
+| App-level Ortho4XP variables | Never in `raw` (the runner refuses them loudly); OXO invariants set by the runner; operational tuning via a pod-level `OXO_O4_APP_OVERRIDES` JSON env applied through each variable's `cfg_app_vars` module binding | Tile-level keys on the tile, app-level keys on their owning modules — anything else is a silent no-op (the drift class this project exists to kill). Network politeness (`max_download_slots`, `http_timeout`, retries) and `ovl_exclude_*` are pod tuning with defaults from the operator's production cfg. |
 | Target paths | Spec paths are container paths; worker validates writability up front | Homogeneous platform; the alternative (path translation) adds a mapping layer nobody needs yet. |
 | Execution mode | Pod-level env knob: `recycle` polls, `stop` exits 0 on drain or after one task | With intent on the task, nothing regional remains in the mode; closes the architecture doc's open decision on the operational side. |
 | Pod spec, v1 | A committed `deploy/worker-pod.yaml` the operator runs | The control plane *serving* pod specs adds an endpoint with one consumer and no automation to use it; committed-and-documented is the honest v1. The ownership stays with this repo either way. |
 | Ortho4XP pinning | Image build argument pins a git commit; recorded as an image label | Version skew is a recorded failure mode of the manual process; the image is the unit all workers share. Asserting provenance at claim time stays open. |
 | Runner I/O | Task JSON on stdin, one JSON result line on stdout, real exit codes | The smallest honest contract; stderr stays Ortho4XP's, so logs survive. |
+
+## Amendments: the operator's conventions (2026-10-02)
+
+Four rulings from the operator after sub-project 4 merged, applied as a
+follow-up branch; the sections above carry inline markers where
+superseded.
+
+1. **`skip_converts` defaults true, overridable per region** — the XEL
+   invariant with an escape hatch (testing; non-XEL scenery).
+2. **The deliverable is the XEL tile** (DSF/`.ter`/mask `.png`s);
+   everything but the DEM cache is perishable.
+3. **Patches are always-on, pod-level, flat per-tile** — Ortho4XP's own
+   convention. Investigation during this ruling found the production
+   frameworks' patches were block-nested while every Ortho4XP in the
+   estate (the pinned image source, the frameworks' own build source)
+   looks up `Patches/<tile>` flat and silently skips on a miss — so
+   production patches had never applied. The NAS tree is flattened, and
+   the worker now logs patch presence per task.
+4. **The scenery source is one merged tree** — `custom_overlay_src`
+   alone suffices; no alternate wiring.
+
+One decision inside the amendment is the controller's, ratified via
+this PR: `ovl_exclude_pol`/`ovl_exclude_net` ride as pod-level app
+overrides (defaults from the operator's production cfg) rather than
+spec fields — they can migrate into the spec later if they turn out to
+be per-region intent.
 
 ## Open decisions
 
