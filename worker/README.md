@@ -28,6 +28,24 @@ layout is block-nested, `patches/<10° block>/<tile>/…` (e.g. `+50+000/+51+000
 name; an empty tree means no patches. The runner logs `patches: present|none for <tile>` for every task, so whether
 a tile was patched is visible in the worker log.
 
+## Site config overlay
+
+Ortho4XP reads some install-root files with no variable to point elsewhere:
+`overpass_servers.txt` (the Overpass/OSM server list, for running local
+instances) and `community_server.txt`. Set `--o4-config-overlay` (env
+`OXO_O4_CONFIG_OVERLAY`) to a directory holding your copies. At worker
+startup, before the first claim, each regular top-level `*.txt` file in it is
+copied over `<install_root>/<name>` and logged. Non-`.txt` files,
+subdirectories and symlinks are skipped with a warning. If the flag is set but
+the directory is unreadable the worker refuses to start; unset or empty means
+no overlay. The `.txt` match is case-sensitive (`.TXT` is skipped), and
+symlinked entries are skipped. That matters on Kubernetes: a ConfigMap or
+Secret mount projects its files as symlinks (`name` -> `..data/name`), so
+they would all be skipped. Materialize the directory as regular files first
+(an init-container copy into an emptyDir, or `subPath` mounts). A name that
+does not already exist in the install root is still installed but logged with
+a warning, since it is likely a typo. See the commented example in `deploy/worker-pod.yaml`.
+
 ## The deliverable
 
 Per tile, about 64 MB: the DSF, the terrain descriptors and the mask PNGs (measured in the pod contract, "Addendum:

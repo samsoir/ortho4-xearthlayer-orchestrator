@@ -429,3 +429,49 @@ async fn pod_level_app_overrides_reach_the_runner_input() {
         "{line}"
     );
 }
+
+#[tokio::test]
+async fn the_config_overlay_is_in_place_by_the_time_the_first_task_runs() {
+    let env = env_with(|s| s).await;
+    let install = env.root().join("install");
+    let overlay = env.root().join("overlay");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(&overlay).unwrap();
+    std::fs::write(install.join("overpass_servers.txt"), "public").unwrap();
+    std::fs::write(overlay.join("overpass_servers.txt"), "local").unwrap();
+    // The runner only starts after a claim, so this proves the overlay is
+    // installed before the first TASK runs (not strictly before the first
+    // claim; the refusal test below covers the pre-claim side).
+    let seen = env.root().join("seen.log");
+    let runner = env.script(
+        "read_install.sh",
+        &format!(
+            r#"read -r line; cat "{}/overpass_servers.txt" >> "{}"; echo '{{"outcome":"ok"}}'"#,
+            install.display(),
+            seen.display()
+        ),
+    );
+    let mut config = env.config(&runner, "stop", 0);
+    config.install_root = install.to_string_lossy().into_owned();
+    config.o4_config_overlay = Some(overlay.to_string_lossy().into_owned());
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::TaskDone
+    );
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "local");
+}
+
+#[tokio::test]
+async fn an_explicit_but_missing_config_overlay_refuses_startup() {
+    let env = env_with(|s| s).await;
+    let runner = env.building_runner();
+    let mut config = env.config(&runner, "stop", 0);
+    config.o4_config_overlay = Some(env.root().join("absent").to_string_lossy().into_owned());
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::Misconfigured
+    );
+    // Refused before any claim: nothing was built or delivered.
+    assert_eq!(entries(&env.target()), 0);
+    assert_eq!(env.job_state().await["state"], "in_progress");
+}

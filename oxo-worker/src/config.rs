@@ -79,6 +79,13 @@ pub struct Config {
     )]
     pub o4_app_overrides: BTreeMap<String, String>,
 
+    /// Directory of site-specific Ortho4XP config files. Each regular
+    /// top-level `*.txt` in it is copied over the same name in the install
+    /// root at startup (e.g. `overpass_servers.txt`, `community_server.txt`).
+    /// Empty or unset means no overlay.
+    #[arg(long, env = "OXO_O4_CONFIG_OVERLAY")]
+    pub o4_config_overlay: Option<String>,
+
     /// The Ortho4XP runner script.
     #[arg(long, default_value = "/opt/oxo/oxo_o4_runner.py")]
     pub runner: String,
@@ -105,6 +112,12 @@ fn parse_app_overrides(raw: &str) -> Result<BTreeMap<String, String>, String> {
 }
 
 impl Config {
+    /// The overlay directory, if one was asked for; empty counts as unset
+    /// (a templated-but-unset env var arrives empty).
+    pub fn config_overlay(&self) -> Option<&str> {
+        self.o4_config_overlay.as_deref().filter(|p| !p.is_empty())
+    }
+
     /// The configured name, else the kernel hostname, else a fixed
     /// fallback — a claim must always carry some identity.
     pub fn worker_name(&self) -> String {
@@ -146,6 +159,7 @@ mod tests {
         assert_eq!(c.content_dir, "/var/oxo/content");
         assert_eq!(c.overlay_src, "/var/oxo/content/xplane");
         assert!(c.o4_app_overrides.is_empty());
+        assert_eq!(c.o4_config_overlay, None);
         assert_eq!(c.runner, "/opt/oxo/oxo_o4_runner.py");
     }
 
@@ -221,5 +235,12 @@ mod tests {
                 parse(&["--control-plane-url", "u", "--o4-app-overrides", empty]).expect("parse");
             assert!(c.o4_app_overrides.is_empty());
         }
+    }
+
+    #[test]
+    fn config_overlay_is_an_optional_path() {
+        let c =
+            parse(&["--control-plane-url", "u", "--o4-config-overlay", "/etc/o4"]).expect("parse");
+        assert_eq!(c.o4_config_overlay.as_deref(), Some("/etc/o4"));
     }
 }
