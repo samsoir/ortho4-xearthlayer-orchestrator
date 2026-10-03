@@ -100,6 +100,9 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
         let roomy = (deps.free_space)()
             .map(|free| free >= config.min_free_scratch_bytes)
             .unwrap_or(false);
+        // The explicit list is intended: this worker claims only the types
+        // it can execute, so a task type added later is deliberately not
+        // claimed until the worker learns it.
         let types: &[&str] = if roomy { &ALL_TYPES } else { &OVERLAY_ONLY };
 
         match client.claim(&worker, types).await {

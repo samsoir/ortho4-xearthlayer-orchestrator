@@ -69,6 +69,11 @@ fn classify(status: u16, body: String) -> ApiFailure {
     }
 }
 
+/// Per-request timeout, kept below the heartbeat interval floor: a hung
+/// report or heartbeat must not leave the child unsupervised. A timeout
+/// surfaces as `Retryable`.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Debug, Clone)]
 pub struct ControlPlane {
     base: String,
@@ -84,7 +89,10 @@ impl ControlPlane {
     pub fn new(base_url: &str) -> Self {
         Self {
             base: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("a client with a timeout builds"),
         }
     }
 

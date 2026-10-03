@@ -79,6 +79,8 @@ pub fn judge(code: Option<i32>, stdout: &str) -> RunOutcome {
 pub struct TaskRun {
     child: Child,
     stdout: Option<JoinHandle<String>>,
+    /// The runner leads its own process group; its pid is the group id.
+    pgid: Option<u32>,
 }
 
 /// Spawn `cmd`, hand it `input` on stdin, and return the supervised handle.
@@ -88,7 +90,11 @@ pub async fn run_task(cmd: &str, input: &RunnerInput) -> io::Result<TaskRun> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
+        // Its own group, so a kill reaches Ortho4XP's subprocesses
+        // (DSFTool and friends) and not only the direct child.
+        .process_group(0)
         .spawn()?;
+    let pgid = child.id();
 
     let mut line = serde_json::to_vec(input).map_err(io::Error::other)?;
     line.push(b'\n');
@@ -108,16 +114,23 @@ pub async fn run_task(cmd: &str, input: &RunnerInput) -> io::Result<TaskRun> {
     Ok(TaskRun {
         child,
         stdout: Some(reader),
+        pgid,
     })
 }
 
 impl TaskRun {
-    /// Wait for the runner to finish and judge the result. Cancel-safe: if
-    /// dropped mid-wait the process is still owned and can be killed.
+    /// Wait for the runner to finish and judge the result. Cancel-safe at
+    /// every await: dropping the future loses nothing, the child stays
+    /// owned and the stdout drain handle stays in `self` until it has
+    /// actually completed, so a later call still sees the whole output.
     pub async fn wait(&mut self) -> io::Result<RunOutcome> {
         let status = self.child.wait().await?;
-        let stdout = match self.stdout.take() {
-            Some(h) => h.await.unwrap_or_default(),
+        let stdout = match self.stdout.as_mut() {
+            Some(h) => {
+                let out = h.await.unwrap_or_default();
+                self.stdout = None;
+                out
+            }
             None => String::new(),
         };
         Ok(judge(status.code(), &stdout))
@@ -127,6 +140,14 @@ impl TaskRun {
     pub async fn kill_and_reap(&mut self) -> io::Result<()> {
         if let Some(h) = self.stdout.take() {
             h.abort();
+        }
+        // Signal the whole group first (while the leader is unreaped, so
+        // the group id cannot have been recycled); ESRCH means it is gone.
+        if let Some(pgid) = self
+            .pgid
+            .and_then(|p| rustix::process::Pid::from_raw(p as i32))
+        {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
         }
         // `kill` signals and then awaits the child.
         match self.child.kill().await {
@@ -223,6 +244,71 @@ mod tests {
         // Reaped: a second kill is a harmless no-op and the pid is gone.
         r.kill_and_reap().await.unwrap();
         assert!(r.id().is_none());
+    }
+
+    fn script(dir: &std::path::Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("stub.sh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_wait_after_exit_does_not_lose_the_output() {
+        // The runner reports ok and exits at once, but a background child
+        // keeps the stdout pipe open for a while, so the drain is still
+        // pending after the exit. Cancelling wait() there (as a heartbeat
+        // tick does) must not lose the drain.
+        let d = tempfile::tempdir().unwrap();
+        let stub = script(
+            d.path(),
+            r#"read -r _l; sleep 0.3 & echo '{"outcome":"ok"}'"#,
+        );
+        let mut r = run_task(&stub, &input()).await.unwrap();
+        let outcome = loop {
+            tokio::select! {
+                o = r.wait() => break o.unwrap(),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+        };
+        assert_eq!(outcome, RunOutcome::Success);
+    }
+
+    #[tokio::test]
+    async fn killing_the_runner_kills_its_grandchildren() {
+        let d = tempfile::tempdir().unwrap();
+        let pidfile = d.path().join("gc.pid");
+        let stub = script(
+            d.path(),
+            &format!("sleep 100000 &\necho $! > {}\nwait", pidfile.display()),
+        );
+        let mut r = run_task(&stub, &input()).await.unwrap();
+        let mut pid = String::new();
+        for _ in 0..500 {
+            pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
+            if pid.ends_with('\n') {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pid = pid.trim().to_string();
+        assert!(!pid.is_empty());
+        let proc = format!("/proc/{pid}");
+        assert!(std::path::Path::new(&proc).exists());
+        r.kill_and_reap().await.unwrap();
+        // The orphaned grandchild is reparented and reaped by init; allow
+        // it a moment.
+        for _ in 0..500 {
+            let gone = std::fs::read_to_string(format!("{proc}/stat"))
+                .map(|s| s.contains(") Z"))
+                .unwrap_or(true);
+            if gone {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("grandchild survived the kill");
     }
 
     #[test]

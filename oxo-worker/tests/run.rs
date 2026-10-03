@@ -372,3 +372,32 @@ async fn low_scratch_claims_overlay_work_only() {
     let lines = std::fs::read_to_string(&seen).unwrap();
     assert!(lines.contains(r#""task_type":"ortho""#), "{lines}");
 }
+
+#[tokio::test]
+async fn a_slow_stdout_drain_never_turns_success_into_failure() {
+    let env = env_with(|s| {
+        s.replace(
+            r#"tiles = ["+50-002", "+51-002"]"#,
+            r#"tiles = ["+50-002"]"#,
+        )
+    })
+    .await;
+    let s = env.scratch().display().to_string();
+    // Exits 0 at once, but a background child holds stdout open, so the
+    // drain outlives several heartbeat ticks.
+    let runner = env.script(
+        "slow.sh",
+        &format!(
+            r#"read -r line
+mkdir -p "{s}/Tiles/zOrtho4XP_+50-002"
+echo built > "{s}/Tiles/zOrtho4XP_+50-002/tile.txt"
+sleep 0.3 &
+echo '{{"outcome":"ok"}}'"#
+        ),
+    );
+    let config = env.config(&runner, "stop", 0);
+    let mut d = deps(u64::MAX);
+    d.heartbeat_interval = Duration::from_millis(5);
+    assert_eq!(run(&config, &env.client, d).await, ExitReason::TaskDone);
+    assert_eq!(env.job_state().await["state"], "complete");
+}
