@@ -205,6 +205,7 @@ mod tests {
             tile: TileId::new(50, -2).expect("in range"),
             task_type: TaskType::Overlay,
             attempt: 1,
+            worker_payload: String::new(),
         };
         let body = serde_json::to_value(ClaimedTaskBody::from(claimed)).unwrap();
         assert_eq!(

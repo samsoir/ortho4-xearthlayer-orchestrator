@@ -56,6 +56,7 @@ mod tests {
             revision: 1,
             max_attempts: MaxAttempts::new(3).expect("non-zero"),
             backoff: BackoffSeconds::new(60).expect("in range"),
+            worker_payload: String::new(),
             tasks: vec![TaskSpec {
                 tile: TileId::new(50, -2).expect("in range"),
                 task_type: TaskType::Ortho,

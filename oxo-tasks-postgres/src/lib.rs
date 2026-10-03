@@ -190,8 +190,8 @@ impl TaskStore for PostgresTaskStore {
         // statement sees the latest committed data.
         let job_uuid = Uuid::new_v4();
         let inserted: Option<(Uuid,)> = sqlx::query_as(
-            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
+            "INSERT INTO jobs (id, region_code, revision, max_attempts, backoff_secs, created_at, worker_payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (region_code, revision) DO NOTHING \
              RETURNING id",
         )
@@ -201,6 +201,7 @@ impl TaskStore for PostgresTaskStore {
         .bind(max_attempts)
         .bind(backoff_secs)
         .bind(now)
+        .bind(&request.worker_payload)
         .fetch_optional(&mut *tx)
         .await
         .map_err(adapter)?;
@@ -209,16 +210,20 @@ impl TaskStore for PostgresTaskStore {
             // DO NOTHING fired, so a committed row holds this identity --
             // an aborted one would have left no conflict and let the insert
             // through. Reading it back cannot come up empty.
-            let (existing_uuid, existing_attempts, existing_backoff): (Uuid, i64, i64) =
-                sqlx::query_as(
-                    "SELECT id, max_attempts, backoff_secs FROM jobs \
+            let (existing_uuid, existing_attempts, existing_backoff, existing_payload): (
+                Uuid,
+                i64,
+                i64,
+                String,
+            ) = sqlx::query_as(
+                "SELECT id, max_attempts, backoff_secs, worker_payload FROM jobs \
                      WHERE region_code = $1 AND revision = $2",
-                )
-                .bind(&request.region_code)
-                .bind(revision)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(adapter)?;
+            )
+            .bind(&request.region_code)
+            .bind(revision)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(adapter)?;
 
             let rows: Vec<(String, String)> =
                 sqlx::query_as("SELECT tile, task_type FROM tasks WHERE job_id = $1")
@@ -239,7 +244,9 @@ impl TaskStore for PostgresTaskStore {
                 .collect();
             requested.sort();
 
-            let same_policy = existing_attempts == max_attempts && existing_backoff == backoff_secs;
+            let same_policy = existing_attempts == max_attempts
+                && existing_backoff == backoff_secs
+                && existing_payload == request.worker_payload;
             if existing_set != requested || !same_policy {
                 return Err(TaskStoreError::JobConflict {
                     region_code: request.region_code,
@@ -313,7 +320,7 @@ impl TaskStore for PostgresTaskStore {
                 .collect()
         });
 
-        let row: Option<(Uuid, Uuid, String, String, i64)> = sqlx::query_as(
+        let row: Option<(Uuid, Uuid, String, String, i64, String)> = sqlx::query_as(
             "UPDATE tasks SET \
                  state = 'claimed', lease_token = $1, claimed_by = $2, \
                  claimed_at = $3, last_heartbeat_at = $3, attempts = attempts + 1 \
@@ -325,7 +332,8 @@ impl TaskStore for PostgresTaskStore {
                  FOR UPDATE SKIP LOCKED \
                  LIMIT 1 \
              ) \
-             RETURNING id, job_id, tile, task_type, attempts",
+             RETURNING id, job_id, tile, task_type, attempts, \
+                 (SELECT worker_payload FROM jobs WHERE jobs.id = tasks.job_id)",
         )
         .bind(token.as_uuid())
         .bind(&request.worker)
@@ -335,7 +343,7 @@ impl TaskStore for PostgresTaskStore {
         .await
         .map_err(adapter)?;
 
-        let Some((task_uuid, job_uuid, tile, task_type, attempts)) = row else {
+        let Some((task_uuid, job_uuid, tile, task_type, attempts, worker_payload)) = row else {
             return Ok(None);
         };
 
@@ -352,6 +360,7 @@ impl TaskStore for PostgresTaskStore {
                 TaskStoreError::Adapter(format!("stored task type {task_type:?} is not recognised"))
             })?,
             attempt: u32::try_from(attempts).unwrap_or(u32::MAX),
+            worker_payload,
         }))
     }
     async fn heartbeat(&self, lease: Lease) -> Result<(), TaskStoreError> {

@@ -56,6 +56,7 @@ pub fn plan(spec: &RegionSpec) -> Result<CreateJob, PlanError> {
         revision: spec.metadata.revision,
         max_attempts,
         backoff,
+        worker_payload: String::new(),
         tasks,
     })
 }
