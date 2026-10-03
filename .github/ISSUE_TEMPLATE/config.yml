@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions & Discussions
-    url: https://github.com/samsoir/ortho4-xearthlayer-orchestrator/discussions
-    about: Ask questions or start a discussion instead of opening an issue.
+    url: https://discord.gg/RPEWQZdxm2
+    about: Ask questions or chat with the community on Discord instead of opening an issue.
   - name: Security vulnerability
     url: https://github.com/samsoir/ortho4-xearthlayer-orchestrator/security/advisories/new
     about: Report vulnerabilities privately. Do not open a public issue.

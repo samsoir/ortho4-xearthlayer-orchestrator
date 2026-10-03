@@ -111,6 +111,10 @@ docs(specs): record the patches layout correction
 - Add a test plan section describing how to verify the change
 - Respond to review feedback constructively
 
+## Questions and Discussion
+
+Live community conversation happens on [Discord](https://discord.gg/RPEWQZdxm2). Ask questions and float ideas there; use issues for concrete bugs and feature requests.
+
 ## What to Work On
 
 - Check [open issues](https://github.com/samsoir/ortho4-xearthlayer-orchestrator/issues) for bugs and feature requests
