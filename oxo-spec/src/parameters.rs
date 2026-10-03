@@ -52,6 +52,11 @@ pub struct ProductionParameters {
     /// than a degraded mode.
     #[serde(default)]
     pub include_overlays: bool,
+    /// Optional name selecting a subdirectory of the deployment's patches
+    /// tree. A single path component of `A-Z a-z 0-9 . _ -`; whether that
+    /// subdirectory exists is environmental, so it is not checked here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches: Option<String>,
     /// Ortho4XP tile-configuration keys passed through untouched, so that
     /// no tuning is unreachable.
     #[serde(default)]
@@ -88,6 +93,38 @@ cover_airports_with_highres = "ICAO"
             toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
         assert!(!parameters.include_overlays);
         assert!(parameters.raw.is_empty());
+    }
+
+    #[test]
+    fn patches_defaults_to_none_so_existing_specifications_stay_valid() {
+        let parameters: ProductionParameters =
+            toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
+        assert_eq!(parameters.patches, None);
+    }
+
+    #[test]
+    fn patches_round_trips_through_toml_ahead_of_the_raw_table() {
+        let mut parameters: ProductionParameters =
+            toml::from_str("provider = \"BI\"\nzoom = 16\npatches = \"uk-fixes\"\n")
+                .expect("parse");
+        assert_eq!(parameters.patches.as_deref(), Some("uk-fixes"));
+        parameters.raw.insert("a".to_string(), "b".to_string());
+        let text = toml::to_string(&parameters).expect("serialise");
+        assert!(
+            text.find("patches").unwrap() < text.find("[raw]").unwrap(),
+            "{text}"
+        );
+        assert_eq!(
+            toml::from_str::<ProductionParameters>(&text).unwrap(),
+            parameters
+        );
+    }
+
+    #[test]
+    fn an_absent_patches_selector_is_not_serialised() {
+        let parameters: ProductionParameters =
+            toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
+        assert!(!toml::to_string(&parameters).unwrap().contains("patches"));
     }
 
     #[test]

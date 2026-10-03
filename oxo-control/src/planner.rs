@@ -88,6 +88,7 @@ mod tests {
                 provider: "BI".to_string(),
                 zoom: 16,
                 include_overlays,
+                patches: None,
                 raw: BTreeMap::new(),
             },
             target: TargetLocation {
