@@ -3,5 +3,6 @@
 pub mod api;
 pub mod config;
 pub mod exec;
+pub mod overlay;
 pub mod run;
 pub mod runner;

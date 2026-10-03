@@ -5,12 +5,13 @@
 //! drive the whole loop with millisecond timers and a fake probe.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::{ApiFailure, ClaimedTask, ControlPlane};
 use crate::config::{Config, Mode};
 use crate::exec::{self, ExecPaths};
+use crate::overlay;
 use crate::runner::{self, RunOutcome, RunnerInput};
 
 /// Why the loop returned. `main` maps these to process exit codes.
@@ -90,6 +91,14 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
     if let Err(e) = exec::cleanup(&paths.scratch) {
         tracing::error!(error = %e, "cannot initialise scratch");
         return ExitReason::Misconfigured;
+    }
+
+    // Pod-level, like the mounts: site config lands before the first claim.
+    if let Some(dir) = config.config_overlay() {
+        if let Err(e) = overlay::apply(Path::new(dir), Path::new(&config.install_root)) {
+            tracing::error!(error = %e, "cannot apply the config overlay");
+            return ExitReason::Misconfigured;
+        }
     }
 
     let worker = config.worker_name();

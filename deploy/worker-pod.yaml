@@ -41,6 +41,14 @@ spec:
         # production values; empty string means no overrides.
         - name: OXO_O4_APP_OVERRIDES
           value: '{"max_download_slots":"2","max_convert_slots":"8","http_timeout":"10.0","max_connect_retries":"5","max_baddata_retries":"5","ovl_exclude_pol":"[0]","ovl_exclude_net":"[]"}'
+        # OPTIONAL, EDIT ME: site-specific Ortho4XP config files. Ortho4XP
+        # reads install-root files such as overpass_servers.txt (the Overpass
+        # server list; use this to point at your local instances) with no
+        # variable to redirect them. Every top-level *.txt in this directory
+        # is copied over the install root at worker startup. Needs the
+        # "o4-config" volume and mount below.
+        # - name: OXO_O4_CONFIG_OVERLAY
+        #   value: "/var/oxo/o4-config"
         # Deliberately left to their defaults (see oxo-worker/src/config.rs):
         #   OXO_WORKER_NAME               (derived from the hostname)
         #   OXO_MIN_FREE_SCRATCH_BYTES    (8 GiB; a ZL16 floor, raise it for
@@ -72,6 +80,10 @@ spec:
         - name: patches
           mountPath: /var/oxo/patches-active
           readOnly: true
+        # OPTIONAL: the site config directory named by OXO_O4_CONFIG_OVERLAY.
+        # - name: o4-config
+        #   mountPath: /var/oxo/o4-config
+        #   readOnly: true
         # The mount path must equal the region spec's target_root so that
         # delivery lands where the operator expects.
         - name: artifacts
@@ -100,6 +112,12 @@ spec:
       hostPath:
         path: /EDIT/ME/oxo/patches      # EDIT ME
         type: Directory
+    # OPTIONAL: directory holding e.g. overpass_servers.txt (see
+    # OXO_O4_CONFIG_OVERLAY above).
+    # - name: o4-config
+    #   hostPath:
+    #     path: /EDIT/ME/oxo/o4-config  # EDIT ME
+    #     type: Directory
     # The deliverable: per tile ~64 MB (DSF, terrain descriptors, mask PNGs)
     # under skip_converts; jpegs and intermediates perish with scratch
     # (pod-contract, "Addendum: the deliverable under skip_converts").
