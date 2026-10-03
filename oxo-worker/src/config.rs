@@ -87,6 +87,10 @@ pub struct Config {
 /// A JSON object whose values are all strings; anything else refuses
 /// startup rather than failing every task later.
 fn parse_app_overrides(raw: &str) -> Result<BTreeMap<String, String>, String> {
+    // A templated-but-unset env var arrives empty: that means no overrides.
+    if raw.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
     let serde_json::Value::Object(map) = value else {
@@ -187,7 +191,7 @@ mod tests {
 
     #[test]
     fn app_overrides_refuse_a_non_object() {
-        for bad in ["[]", "\"x\"", "3", "not json", ""] {
+        for bad in ["[]", "\"x\"", "3", "not json"] {
             assert!(
                 parse(&["--control-plane-url", "u", "--o4-app-overrides", bad]).is_err(),
                 "{bad:?} must refuse startup"
@@ -207,6 +211,15 @@ mod tests {
                 parse(&["--control-plane-url", "u", "--o4-app-overrides", bad]).is_err(),
                 "{bad:?} must refuse startup"
             );
+        }
+    }
+
+    #[test]
+    fn empty_app_overrides_mean_none() {
+        for empty in ["", "  "] {
+            let c =
+                parse(&["--control-plane-url", "u", "--o4-app-overrides", empty]).expect("parse");
+            assert!(c.o4_app_overrides.is_empty());
         }
     }
 }

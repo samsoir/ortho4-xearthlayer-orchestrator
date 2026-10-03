@@ -436,6 +436,8 @@ fn an_app_override_lands_typed_on_its_own_module_not_the_tile() {
         app_on(&o.log, "O4_Overlay_Utils")["ovl_exclude_pol"],
         serde_json::json!([0, 3])
     );
+    assert!(tile.get("ovl_exclude_pol").is_none());
+    assert!(img.get("ovl_exclude_pol").is_none());
     let attrs = tile_attrs(&o.log);
     assert!(attrs.get("max_download_slots").is_none());
     assert!(attrs.get("http_timeout").is_none());
@@ -512,18 +514,20 @@ fn the_overlay_source_is_refused_in_overrides() {
 }
 
 #[test]
-fn an_app_level_key_in_raw_is_refused_naming_the_key() {
-    let Some(o) = run_raw(
-        "ortho",
-        "+50-002",
-        &[],
-        serde_json::json!({"max_download_slots": "2"}),
-    ) else {
-        return;
-    };
-    assert_configure_failure(&o, "max_download_slots");
-    let reason = last_json(&o.stdout)["reason"].as_str().unwrap().to_string();
-    assert!(reason.contains("overrides"), "{reason}");
+fn an_app_level_key_in_raw_is_refused_for_every_task_type() {
+    for t in ["ortho", "overlay"] {
+        let Some(o) = run_raw(
+            t,
+            "+50-002",
+            &[],
+            serde_json::json!({"max_download_slots": "2"}),
+        ) else {
+            return;
+        };
+        assert_configure_failure(&o, "max_download_slots");
+        let reason = last_json(&o.stdout)["reason"].as_str().unwrap().to_string();
+        assert!(reason.contains("overrides"), "{t}: {reason}");
+    }
 }
 
 #[test]

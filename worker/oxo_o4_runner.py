@@ -47,7 +47,6 @@ APP_MODULES = {
     "IMG": "O4_Imagery_Utils",
     "TILE": "O4_Tile_Utils",
     "OVL": "O4_Overlay_Utils",
-    "CFG": "O4_Config_Utils",
 }
 
 # The pod wires these itself (the overlay source is the pod's alone).
@@ -64,9 +63,16 @@ def set_app_var(CFG, key, value):
     setattr(importlib.import_module(APP_MODULES[binding]), key, value)
 
 
-def apply_app_level(CFG, config, overrides):
+def apply_app_level(CFG, config, overrides, raw):
     """skip_converts from the payload, then the pod's overrides. Everything
     is validated and converted per the variable's declared type."""
+    # Refused for every task type: only ortho builds a Tile from raw, but an
+    # app-level key in any task's raw is a silent no-op worth failing loudly.
+    for k in raw:
+        if k in CFG.cfg_app_vars:
+            raise ValueError(
+                "%r is an app-level variable; app-level keys belong in the pod's overrides, not raw" % k
+            )
     if not isinstance(config.get("skip_converts"), bool):
         raise ValueError("config.skip_converts must be a bool, got %r" % (config.get("skip_converts"),))
     set_app_var(CFG, "skip_converts", config["skip_converts"])
@@ -124,7 +130,7 @@ def main(out):
         # App-level variables go to their owning modules before anything
         # runs (the providers read some of them).
         phase = "configure"
-        apply_app_level(CFG, config, inp.get("app_overrides") or {})
+        apply_app_level(CFG, config, inp.get("app_overrides") or {}, config.get("raw") or {})
         sys.stderr.write(
             "patches: %s for %s\n"
             % ("present" if os.path.isdir(FNAMES.patch_dir(lat, lon)) else "none", inp["tile"])
@@ -143,10 +149,6 @@ def main(out):
             tile.default_website = config["provider"]
             tile.default_zl = config["zoom"]
             for k, v in (config.get("raw") or {}).items():
-                if k in CFG.cfg_app_vars:
-                    raise ValueError(
-                        "%r is an app-level variable; app-level keys belong in the pod's overrides, not raw" % k
-                    )
                 setattr(tile, k, convert_raw(CFG.cfg_vars, k, v))
             for fn in (VMAP.build_poly_file, MESH.build_mesh, MASK.build_masks, TILE.build_tile):
                 phase = fn.__name__
