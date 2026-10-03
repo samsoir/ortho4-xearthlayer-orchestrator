@@ -23,6 +23,26 @@
 `Patches` is also a symlink, to `/var/oxo/patches-active`, which the supervisor points at
 `/var/oxo/content/patches/<set>` per task — an indirection so the read-only content mount never needs to be writable.
 
+## Run it
+
+1. Build the image: `make image` (produces `oxo-worker:dev`).
+2. Prepare the mounts per the table above: a scratch volume, the shared DEM cache, the read-only content tree
+   (X-Plane data and patches), and an artifacts directory mounted at the region's `target_root`.
+3. Edit the `EDIT ME` placeholders in `deploy/worker-pod.yaml` (control-plane URL, the three hostPaths, the
+   artifacts mount path), then `podman kube play deploy/worker-pod.yaml`. `podman kube down deploy/worker-pod.yaml`
+   removes it.
+
+The settings an operator most often touches:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OXO_CONTROL_URL` | none, required | Where `oxo-controld` is reachable from inside the pod. |
+| `OXO_MODE` | `recycle` | `recycle` cleans scratch and takes the next task; `stop` performs one task and exits. |
+| `OXO_MIN_FREE_SCRATCH_BYTES` | 8 GiB | A ZL16 floor (peak observed scratch 3.33 GiB). Raise it when producing above ZL16: ZL17 projects to about 13 GiB. |
+
+The pod spec requests 6 GiB of memory and limits it at 8 GiB: the measured budget for a ZL16 ortho worker.
+Both numbers, and their basis, are in `docs/specs/2026-10-02-ortho4xp-pod-contract.md`, section (h).
+
 ## Tools, never data
 
 No scenery, DEM, patches or imagery in any layer. Everything of that kind arrives through the mounts above at run time.

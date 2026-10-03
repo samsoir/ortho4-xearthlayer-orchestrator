@@ -16,6 +16,9 @@ Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.75):
 | `oxo-tasks-postgres` | The PostgreSQL adapter for that port, held to the same conformance suite against a real database. |
 | `oxo-control` | The control plane library — sub-project 3. The planner, the HTTP API as an `axum::Router` over an injected `Arc<dyn TaskStore>`, the wire types, the error mapping, and the reaper loop. Never depends on `sqlx` or `oxo-tasks-postgres`. |
 | `oxo-controld` | The control plane binary — the composition root. Parses configuration, connects the PostgreSQL adapter, builds the router, spawns the reaper, serves. The only new code that knows PostgreSQL exists. |
+| `oxo-worker` | The worker pod's binary — sub-project 4. Claims tasks from the OXO API, runs them through a Python runner (`worker/oxo_o4_runner.py`) that calls the `O4_*` build functions with real exit codes, heartbeats, delivers artifacts and reports. Talks to the control plane over HTTP only; never touches the persistence layer. Its tests need `python3` on `PATH` (the runner contract tests and the fake-Ortho4XP acceptance run it). |
+
+Non-crate artifacts: `worker/` holds the pod image (`Containerfile`, the runner, and a README with the mount-point contract); `deploy/worker-pod.yaml` is the Podman-kube pod spec for one worker, with operator-edited placeholders marked `EDIT ME`.
 
 Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them):
 
@@ -24,11 +27,12 @@ Build/lint/test commands, all fronted by the `Makefile` (`make help` lists them)
 - `make test` (all tests), `make lint` (clippy), `make format` / `make format-check`, `make build`, `make check`, `make coverage` (needs `cargo-llvm-cov`), `make clean`.
 - `make pg-up` / `make pg-down` — start/stop a disposable PostgreSQL in Podman for the adapter tests.
 - `make verify-db` — brings PostgreSQL up, runs the `oxo-tasks-postgres` conformance suite against it, then tears it down.
-- The daemon runs as `cargo run -p oxo-controld -- --database-url …`; `--help` lists its flags and their environment-variable fallbacks.
+- `make image` — build the `oxo-worker:dev` pod image with podman. `make worker-smoke` — build it, then run the runner's fake-Ortho4XP success case inside the image.
+- The daemon runs as `cargo run -p oxo-controld -- --database-url …`; `--help` lists its flags and their environment-variable fallbacks. A worker runs as `cargo run -p oxo-worker -- --control-plane-url http://HOST:8080` (or `OXO_CONTROL_URL`), or as a pod via `podman kube play deploy/worker-pod.yaml` after `make image` and editing the placeholders.
 
 **`verify` and `verify-db` are deliberately separate, and a newcomer must know why.** `test`/`test-strict`/`verify` exclude `oxo-tasks-postgres` **by package name** (`--exclude oxo-tasks-postgres`), not by a runtime skip. Since `oxo-controld` depends on the adapter, a green `make verify` does compile and lint it, but it proves nothing about its behaviour — the adapter's tests never ran. Only `make verify-db` exercises it, against a real, disposable database. The exclusion is by name specifically so the gap is visible in which target you ran, rather than hidden behind tests that silently no-op without a `DATABASE_URL`.
 
-Currently passing: `make verify` runs 194 Rust tests (`oxo-control`: 29 lib tests; `oxo-controld`: 4; `oxo-spec`: 81 across its lib, CLI and `validation.rs` suites; `oxo-tasks`: 53 lib tests plus the 27-case conformance suite against the in-memory adapter) plus 11 Gherkin acceptance scenarios (8 in `oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`; 3 for the control plane in `oxo-control/tests/acceptance.rs`). `make verify-db` runs 28 tests against PostgreSQL — the same 27 conformance cases plus a migration-idempotency test.
+Currently passing (transcribed from fresh runs): `make verify` runs 270 Rust tests (`oxo-control`: 34 lib tests; `oxo-controld`: 6; `oxo-spec`: 80 lib plus 4 in `validation.rs`; `oxo-spec-cli`: 5; `oxo-tasks`: 53 lib tests plus the 29-case conformance suite against the in-memory adapter; `oxo-worker`: 34 lib plus 8 client, 7 run-loop and 10 runner-contract tests) plus 14 Gherkin acceptance scenarios (8 in `oxo-spec/features/region_spec.feature`, run by `oxo-spec/tests/acceptance.rs`; 3 for the control plane in `oxo-control/tests/acceptance.rs`; 3 for the worker in `oxo-worker/tests/acceptance.rs`). `make verify-db` runs 30 tests against PostgreSQL — the same 29 conformance cases plus a migration-idempotency test.
 
 Also note:
 
