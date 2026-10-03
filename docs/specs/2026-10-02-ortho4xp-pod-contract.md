@@ -35,29 +35,39 @@ and the runner:
 | **Total** | 1631.3 s | **1211.1 s (~20 min)** |
 
 `build_poly_file` dominates and is Overpass/OSM-bound, not CPU-bound
-(the process sat at ~1% CPU on network waits). +51+000 covers
+(the process sat near idle CPU on network waits — sampled via `ps`
+during the run; not captured in a log artifact). +51+000 covers
 metropolitan London's eastern edge — a heavy OSM tile; lighter tiles
 will be substantially faster in this phase. The run-to-run poly delta
-(1573 → 913 s) is Overpass server variance, not local caching: OSM data
-lives on scratch and was wiped between runs.
+(1573 → 913 s) mixes two causes that cannot be separated from these
+logs: run 2's warm DEM cache (run 1 downloaded 209 MiB of elevation
+inside this phase) and ordinary Overpass server variance. OSM data
+itself was not cached — it lives on scratch, which was wiped between
+runs.
 
 ## (b) Peak memory (cgroup `memory.peak`)
 
-- Run 1 (no imagery): 2,204,291,072 B (~2.1 GiB)
-- Run 2 (real imagery): **5,163,413,504 B (~4.8 GiB)**
+- Run 1 (no imagery): 2,204,291,072 B (2.05 GiB)
+- Run 2 (real imagery): **5,163,413,504 B (4.81 GiB)**
 
-The DDS conversion in `build_tile` is the high-water mark. Worker pods
+The only difference between the runs is real imagery work in
+`build_tile`, so the 2.7 GiB delta is attributable to it. Worker pods
 should budget ≥ 6 GiB for ZL16 ortho tasks.
 
 ## (c) Peak scratch
 
-- Final scratch after run 2: 3,575,747,672 B (~3.3 GiB), of which the
-  deliverable (`zOrtho4XP_+51+000/`) holds 2.5 GiB of textures (282 DDS
-  files) plus a 53 MB DSF, 79 MB mesh and intermediates.
-- Sampled high-water mark during run 2: 3,394,856,702 B one minute
-  before completion — scratch grows monotonically through `build_tile`;
-  peak ≈ final.
-- At ZL17/18 expect roughly 4×/16× the texture volume.
+- Final scratch after run 2: 3,575,747,672 B (3.33 GiB). Breakdown by
+  byte count (`du -sb`): `Tiles/` 2,822,676,702 (the deliverable build
+  directory, of which `textures/` is 2,595,953,294 across 282 DDS files,
+  `Earth nav data/` 55,569,820, the mesh 82,248,820);
+  `Orthophotos/` 743,412,712 (source jpegs — see the directory
+  contract); `OSM_data/` 8,489,646; `Masks/` 1,167,354.
+- The scratch sampler recorded a non-decreasing series ending at
+  3,394,856,702 B (the samples are untimed, so this is a lower bound on
+  the true high-water mark, not an observation of it; the final size
+  above is the better number).
+- At ZL17/18 expect roughly 4×/16× the texture and source-imagery
+  volume.
 
 ## (d) The DEM cache
 
@@ -73,9 +83,10 @@ should budget ≥ 6 GiB for ZL16 ortho tasks.
 ## (e) Overlay task
 
 - `build_overlay(51, 0)`: **2.9 s**, producing a 12,138,720 B DSF.
-- Ran in a fresh container with only the content mount — no DEM, no
-  ortho outputs, no network. X-Plane 12's shipped DSFs are 7z-compressed;
-  Ortho4XP detects and extracts via p7zip (in the image).
+- Ran in a fresh container with only the content and scratch mounts —
+  no ortho outputs. X-Plane 12's shipped DSFs are 7z-compressed;
+  Ortho4XP checks the file magic and extracts before converting
+  (`O4_Overlay_Utils.py:78-86`), which is why the image carries p7zip.
 - The measured ratio to an ortho task (~2.9 s vs ~1200 s; 12 MB vs
   3.3 GiB scratch) confirms the architecture's premise that overlay work
   is orders of magnitude lighter — the overlay-only capacity fallback is
@@ -98,8 +109,12 @@ egress code):
   (`O4_File_Names.resource_path`), so the runner chdirs to the install
   root; the image's symlinks place every working directory on the right
   mount.
-- `Orthophotos/` stayed empty in both runs at ZL16/GO2 — downloaded
-  jpegs are assembled and converted under the build directory instead.
+- Source imagery lands in `Orthophotos/<block>/<tile>/<provider>_<zl>/`
+  as jpegs (743,412,712 B for this tile at GO2/ZL16) and is **not part
+  of the deliverable** — the DDS textures in the build directory are
+  derived from it. The worker's egress correctly ships only the build
+  directory; the jpegs die with the wholesale scratch wipe. (An earlier
+  draft of this document wrongly called `Orthophotos/` empty.)
 
 ## (g) Failure taxonomy, probed
 
@@ -111,9 +126,13 @@ egress code):
   the sharpest confirmation of the architecture's "never trust
   Ortho4XP's exit status": the runner's phase wrapping catches
   exceptions, but a *silently degraded* success is only detectable by
-  artifact inspection (texture count/bytes) — recorded as an open
-  hardening idea for the worker (cheap sanity floor on texture bytes
-  before egress).
+  artifact inspection (texture count/bytes; run 1's `textures/` held
+  about 1.1 MiB of placeholder PNGs where run 2's holds 2.4 GiB of
+  DDS — observed before run 1's tree was wiped, not retained) —
+  recorded as an open hardening idea for the worker (a cheap sanity
+  floor on texture bytes before egress). The brief's `NOPE` provider
+  probe was substituted by this naturally occurring run-1 failure,
+  which exercises the same path with the same signature.
 - **Missing X-Plane content (observed):** overlay extraction fails fast
   with `file Earth nav data/<block>/<tile>.dsf absent` and
   `build_overlay` returns 0 (its *success* value is 1) — no exception,
@@ -121,10 +140,10 @@ egress code):
   tasks. The ortho path logs the same absence while extracting rasters
   and continues.
 - **No network (probed, `--network none`):** `build_poly_file` stalls
-  **silently** — over twelve minutes the process produced exactly one
-  log line (the config-created notice) and no error, sitting at ~0% CPU
-  inside its first Overpass attempt. No exception, no exit, no retry
-  chatter. From outside the process this is indistinguishable from a
+  **silently** — for the probe's whole lifetime (several minutes before
+  it was cut off) the process produced exactly one log line (the
+  config-created notice) and no error; the 64-byte log IS the artifact.
+  No exception, no exit, no retry chatter. From outside the process this is indistinguishable from a
   long build; the lease system's `max_task_duration` backstop is the
   only effective remedy, which is precisely why it exists. (The pinned
   commit includes the fix that stops a `tile.dem=None` crash when an
@@ -139,15 +158,18 @@ egress code):
 
 ## (h) Recommended defaults derived from these numbers
 
-- **Worker `--min-free-scratch-bytes`:** 8 GiB (8,589,934,592). Peak
-  observed scratch was ~3.3 GiB at ZL16 on a heavy tile; 8 GiB covers
-  ZL17 on most tiles and concurrent overlay work, while letting the
-  overlay-only fallback engage early. (The shipped interim default was
-  50 GiB — overly conservative; trued to 8 GiB with this document.)
-- **Operator guidance for `--max-task-duration-secs`:** the default
-  21600 (6 h) is comfortable: the measured heavy-tile ZL16 ortho was
-  ~20–27 min end to end. For ZL18 regions, scale the expectation ~16×
-  on `build_tile` and revisit.
+- **Worker `--min-free-scratch-bytes`:** 8 GiB (8,589,934,592) as a
+  **ZL16 floor**: peak observed scratch was 3.33 GiB on a heavy tile,
+  so 8 GiB gives better than 2× margin. It does NOT cover ZL17 —
+  scaling textures and source imagery ~4× projects ~13 GiB — so
+  operators producing above ZL16 must raise the flag with the zoom.
+  (The shipped interim default was 50 GiB,
+  `oxo-worker/src/config.rs:43`; trued to 8 GiB with this document.)
+- **Operator guidance for `--max-task-duration-secs`:** the daemon
+  default of 21600 s (`oxo-controld/src/config.rs:24`) is comfortable:
+  the measured heavy-tile ZL16 ortho was ~20–27 min end to end. For
+  ZL18 regions, scale the expectation ~16× on `build_tile` and
+  revisit.
 - **Memory budget per ortho worker:** ≥ 6 GiB.
 - **Heartbeat interval 30 s against a 120 s timeout:** unchanged; the
   long network stalls in `build_poly_file` are in-process waits, not

@@ -34,13 +34,14 @@ pub struct Config {
     pub heartbeat_interval_secs: u64,
 
     /// Claim only if the scratch volume has at least this much free.
-    // Interim default pending the measured recommendation in
-    // docs/specs/2026-10-02-ortho4xp-pod-contract.md; revisit when the
-    // spike lands.
+    // 8 GiB: the measured ZL16 floor — peak observed scratch was
+    // 3.33 GiB on a heavy tile (docs/specs/2026-10-02-ortho4xp-pod-
+    // contract.md, section h). Producing above ZL16 needs this raised
+    // with the zoom (ZL17 projects ~13 GiB).
     #[arg(
         long,
         env = "OXO_MIN_FREE_SCRATCH_BYTES",
-        default_value_t = 53_687_091_200
+        default_value_t = 8_589_934_592
     )]
     pub min_free_scratch_bytes: u64,
 
@@ -109,7 +110,7 @@ mod tests {
         assert_eq!(c.mode, Mode::Recycle);
         assert_eq!(c.poll_interval_secs, 15);
         assert_eq!(c.heartbeat_interval_secs, 30);
-        assert_eq!(c.min_free_scratch_bytes, 53_687_091_200);
+        assert_eq!(c.min_free_scratch_bytes, 8_589_934_592);
         assert_eq!(c.install_root, "/opt/ortho4xp");
         assert_eq!(c.scratch_dir, "/var/oxo/scratch");
         assert_eq!(c.content_dir, "/var/oxo/content");
