@@ -25,3 +25,18 @@ def ret(name, ok=1):
     return 1 on success; build_masks returns None), 0 when
     FAKE_O4_RETURN_ZERO names it."""
     return 0 if os.environ.get("FAKE_O4_RETURN_ZERO") == name else ok
+
+
+APP_NAMES = ("skip_converts", "max_download_slots", "http_timeout", "ovl_exclude_pol",
+             "custom_overlay_src", "custom_overlay_src_alternate")
+
+
+def rec_app():
+    """Record which app-level variables sit on which fake module, so a value
+    set on the wrong module is visible. Modules start without these names."""
+    import json
+    for name in ("O4_Tile_Utils", "O4_Imagery_Utils", "O4_Overlay_Utils"):
+        m = sys.modules.get(name)
+        if m is not None:
+            held = {k: getattr(m, k) for k in APP_NAMES if hasattr(m, k)}
+            rec("app %s %s" % (name, json.dumps(held, sort_keys=True)))

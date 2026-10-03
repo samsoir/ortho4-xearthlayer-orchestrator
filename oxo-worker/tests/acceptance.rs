@@ -163,8 +163,6 @@ echo '{{"outcome":"ok"}}'"#
             &self.scratch().to_string_lossy(),
             "--content-dir",
             &content.to_string_lossy(),
-            "--patches-link",
-            &self.dir.path().join("patches-active").to_string_lossy(),
             "--runner",
             runner,
         ])

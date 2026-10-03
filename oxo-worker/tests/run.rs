@@ -99,8 +99,6 @@ echo '{{"outcome":"ok"}}'"#
             &self.scratch().to_string_lossy(),
             "--content-dir",
             &content.to_string_lossy(),
-            "--patches-link",
-            &self.root().join("patches-active").to_string_lossy(),
             "--runner",
             runner,
         ])
@@ -402,4 +400,30 @@ echo '{{"outcome":"ok"}}'"#
     d.heartbeat_interval = Duration::from_millis(5);
     assert_eq!(run(&config, &env.client, d).await, ExitReason::TaskDone);
     assert_eq!(env.job_state().await["state"], "complete");
+}
+
+#[tokio::test]
+async fn pod_level_app_overrides_reach_the_runner_input() {
+    let env = env_with(|s| s).await;
+    let seen = env.root().join("seen.log");
+    let runner = env.script(
+        "record.sh",
+        &format!(
+            r#"read -r line; echo "$line" >> "{}"; echo '{{"outcome":"ok"}}'"#,
+            seen.display()
+        ),
+    );
+    let mut config = env.config(&runner, "stop", 0);
+    config
+        .o4_app_overrides
+        .insert("max_download_slots".into(), "2".into());
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::TaskDone
+    );
+    let line = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        line.contains(r#""app_overrides":{"max_download_slots":"2"}"#),
+        "{line}"
+    );
 }

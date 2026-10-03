@@ -154,6 +154,7 @@ async fn work(
         config: task.config.clone(),
         install_root: config.install_root.clone(),
         overlay_src: config.overlay_src.clone(),
+        app_overrides: config.o4_app_overrides.clone(),
     };
     let mut run = match runner::run_task(&config.runner, &input).await {
         Ok(run) => run,
