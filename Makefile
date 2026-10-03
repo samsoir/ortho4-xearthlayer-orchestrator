@@ -73,3 +73,10 @@ verify-db: ## Run the conformance suite against a real PostgreSQL
 .PHONY: image
 image: ## Build the worker pod image (podman)
 	podman build -t oxo-worker:dev -f worker/Containerfile .
+
+.PHONY: worker-smoke
+worker-smoke: image ## Run the runner's fake-O4 success case inside the image
+	d=$$(mktemp -d) && cp -r oxo-worker/tests/fixtures/fake_o4 $$d/install && chmod -R a+rwX $$d && \
+	printf '{"tile":"+50-002","task_type":"ortho","config":{"v":1,"provider":"BI","zoom":16,"raw":{},"target_root":"/x"},"install_root":"/fake","overlay_src":"/xp"}' | \
+	podman run --rm -i --network none -v $$d/install:/fake --entrypoint python3 oxo-worker:dev /opt/oxo/oxo_o4_runner.py | tee $$d/out; \
+	status=$$?; grep -q '"outcome": "ok"' $$d/out && ok=0 || ok=1; rm -rf $$d; [ $$status -eq 0 ] && exit $$ok || exit $$status

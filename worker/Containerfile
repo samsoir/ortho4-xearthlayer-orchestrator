@@ -1,11 +1,16 @@
 # worker/Containerfile
+FROM docker.io/library/rust:1-slim AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p oxo-worker
+
 FROM docker.io/library/python:3.12-slim
 
 ARG ORTHO4XP_REPO=https://github.com/Shred86/Ortho4XP.git
 ARG ORTHO4XP_COMMIT=c363134799e8130e1e897ff9064bc53d058f5ba9
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git p7zip-full build-essential libgdal-dev \
+    && apt-get install -y --no-install-recommends git p7zip-full build-essential libgdal-dev tk \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone ${ORTHO4XP_REPO} /opt/ortho4xp \
@@ -34,3 +39,7 @@ RUN set -eux; \
 
 LABEL oxo.ortho4xp-commit=${ORTHO4XP_COMMIT}
 WORKDIR /opt/ortho4xp
+
+COPY --from=builder /src/target/release/oxo-worker /opt/oxo/oxo-worker
+COPY worker/oxo_o4_runner.py /opt/oxo/oxo_o4_runner.py
+ENTRYPOINT ["/opt/oxo/oxo-worker"]
