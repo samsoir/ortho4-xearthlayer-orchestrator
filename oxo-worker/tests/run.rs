@@ -203,13 +203,12 @@ async fn a_recycle_worker_drains_a_two_task_job() {
     );
 }
 
-/// Characterization of the production spawn path: the supervisor execs the
-/// runner directly, so a script with a shebang and the exec bit and NO
-/// interpreter prefix must run to a completed task. (The first end-to-end
-/// run died with EACCES because the real runner was mode 644; every other
-/// test here goes through fixtures whose bits were already right.)
+/// Pins only that the supervisor spawns a runner by bare path (shebang +
+/// exec bit, no interpreter prefix). It uses its own temp script, so it
+/// says nothing about the checked-in runner's mode; that is guarded by
+/// `the_checked_in_runner_is_directly_executable` in runner_contract.rs.
 #[tokio::test]
-async fn a_shebang_runner_is_exec_d_directly_and_completes_a_task() {
+async fn a_bare_path_shebang_runner_spawns_and_completes_a_task() {
     let env = env_with(|s| {
         s.replace(
             r#"tiles = ["+50-002", "+51-002"]"#,
