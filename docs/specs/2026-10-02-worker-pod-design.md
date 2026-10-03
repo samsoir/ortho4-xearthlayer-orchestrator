@@ -107,7 +107,7 @@ deployment topology OXO never sees.
 | `scratch` | Ortho4XP's working directories. Wiped wholesale after every task. | read-write, ephemeral |
 | `artifacts` | The deliverable. Mounted so that each region's `target.root` exists inside the pod. | read-write, durable |
 | `dem-cache` | Mounted at Ortho4XP's fixed `Elevation_data` location. The deliberate exception to statelessness. | read-write, shared |
-| `content` | Read-only source material: the X-Plane Global Scenery / demo data (the overlay source) and the patches tree — **flat per-tile** (`patches/<tile>/…`), Ortho4XP's own layout, mounted whole at the image's fixed `Patches` location (amended below). | read-only, shared |
+| `content` | Read-only source material: the X-Plane Global Scenery / demo data (the overlay source) and the patches tree — **block-nested** (`patches/<10° block>/<tile>/…`, e.g. `+50+000/+51+000`), Ortho4XP's own layout, mounted whole at the image's fixed `Patches` location (amended below). | read-only, shared |
 
 Ortho4XP's directory layout is install-relative and fixed
 (`O4_File_Names.py`: `Patch_dir`, `Elevation_dir`, `OSM_dir`,
@@ -216,7 +216,7 @@ start → validate mounts → loop:
     422/4xx → log, exit 2 (misconfiguration — do not spin)
     503 → sleep, retry (the one retryable status, per the worker rule)
     200 → run the task:
-      verify target_root writable; log whether Patches/<tile> exists
+      verify target_root writable; log whether Patches/<block>/<tile> exists
         (patch skipping must never be silent again); (overlay) pre-create the
         10° block output directory idempotently — Ortho4XP's own check is
         the recorded TOCTOU race; never rely on it
@@ -314,7 +314,7 @@ a targeted probe before the egress filter is written.
 | Payload in idempotency | A differing payload is `JobConflict` | Resuming under silently-changed parameters is the lie `JobConflict` exists to prevent; closes a real hole. |
 | Image contents | Tools, never data | Global Scenery and friends are large and deployment-specific (operator ruling); everything reaches the pod as mounts whose backing store OXO never sees. |
 | Supervisor language | Rust binary driving a Python runner subprocess | Ortho4XP exits 0 on failure, so the reliable layer must own the process; Python only where the `O4_*` imports force it. |
-| Patches | **Amended (operator conventions):** always-on at pod level — the content volume's flat per-tile patches tree mounts read-only at the image's fixed `Patches` location; Ortho4XP matches by coordinate, as in its own distribution. The per-region selector is removed. The worker logs per task whether `Patches/<tile>` exists. | The operator's convention is Ortho4XP's own; and the selector's flexibility paid for machinery nobody needed. The presence log exists because `O4_Vector_Map` silently skips a missing patch dir — verified to have silently skipped the production frameworks' block-nested patches, which no code in the estate ever read. |
+| Patches | **Amended (operator conventions):** always-on at pod level — the content volume's block-nested patches tree mounts read-only at the image's fixed `Patches` location; Ortho4XP matches by coordinate, as in its own distribution. The per-region selector is removed. The worker logs per task whether `Patches/<block>/<tile>` exists. | The operator's convention is Ortho4XP's own; and the selector's flexibility paid for machinery nobody needed. The presence log exists because `O4_Vector_Map` silently skips a missing patch dir (the layout itself is Ortho4XP's own `long_latlon`, block-nested). |
 | `skip_converts` | Region-level spec field, default `true`, payload-carried, runner-applied to its owning module | XEL generates DDS at runtime (the invariant); the escape hatch serves testing and non-XEL scenery (operator ruling). |
 | The deliverable | DSF + `.ter` + mask `.png`s only; everything else perishable except the DEM cache | Operator ruling: XEL streams imagery; shipping the build directory wasted ~2.5 GiB/tile of data XEL ignores. |
 | App-level Ortho4XP variables | Never in `raw` (the runner refuses them loudly); OXO invariants set by the runner; operational tuning via a pod-level `OXO_O4_APP_OVERRIDES` JSON env applied through each variable's `cfg_app_vars` module binding | Tile-level keys on the tile, app-level keys on their owning modules — anything else is a silent no-op (the drift class this project exists to kill). Network politeness (`max_download_slots`, `http_timeout`, retries) and `ovl_exclude_*` are pod tuning with defaults from the operator's production cfg. |
@@ -334,13 +334,18 @@ superseded.
    invariant with an escape hatch (testing; non-XEL scenery).
 2. **The deliverable is the XEL tile** (DSF/`.ter`/mask `.png`s);
    everything but the DEM cache is perishable.
-3. **Patches are always-on, pod-level, flat per-tile** — Ortho4XP's own
-   convention. Investigation during this ruling found the production
-   frameworks' patches were block-nested while every Ortho4XP in the
-   estate (the pinned image source, the frameworks' own build source)
-   looks up `Patches/<tile>` flat and silently skips on a miss — so
-   production patches had never applied. The NAS tree is flattened, and
-   the worker now logs patch presence per task.
+3. **Patches are always-on, pod-level, block-nested** — Ortho4XP's own
+   convention: `patch_dir(lat, lon)` is `Patches/<10° block>/<tile>`
+   because `O4_File_Names.long_latlon` returns `os.path.join(block,
+   tile)` (e.g. `+50+000/+51+000`), at the pinned image commit. The
+   operator stated block-nested was correct. A controller
+   source-reading error (reading `patch_dir`'s one-liner without
+   `long_latlon`) wrongly concluded the layout was flat and wrongly
+   claimed the production patches had never applied; the final review
+   caught it. The layout is, and always was, block-nested, and the
+   production patches were never silently skipped. The per-task
+   presence log stays because `O4_Vector_Map` still silently skips a
+   missing patch dir.
 4. **The scenery source is one merged tree** — `custom_overlay_src`
    alone suffices; no alternate wiring.
 

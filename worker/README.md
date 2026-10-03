@@ -24,7 +24,7 @@
 ## Patches
 
 Patches are always on. `/opt/ortho4xp/Patches` is a symlink to `/var/oxo/patches-active`, a read-only mount whose
-layout is flat and per-tile, Ortho4XP's own, matched by tile coordinate. There is no per-task selector and no set
+layout is block-nested, `patches/<10° block>/<tile>/…` (e.g. `+50+000/+51+000`), Ortho4XP's own, matched by tile coordinate. There is no per-task selector and no set
 name; an empty tree means no patches. The runner logs `patches: present|none for <tile>` for every task, so whether
 a tile was patched is visible in the worker log.
 
@@ -50,7 +50,7 @@ The settings an operator most often touches:
 |---|---|---|
 | `OXO_CONTROL_URL` | none, required | Where `oxo-controld` is reachable from inside the pod. |
 | `OXO_MODE` | `recycle` | `recycle` cleans scratch and takes the next task; `stop` performs one task and exits. |
-| `OXO_O4_APP_OVERRIDES` | none (no overrides) | JSON object of Ortho4XP app-level variable names to string values, e.g. `{"max_download_slots":"2","http_timeout":"10.0"}`. Empty string means no overrides. App-level variables are refused in the region spec's raw keys; this is their only home. `deploy/worker-pod.yaml` carries the operator's production values. |
+| `OXO_O4_APP_OVERRIDES` | none (no overrides) | JSON object of Ortho4XP app-level variable names to string values, e.g. `{"max_download_slots":"2","http_timeout":"10.0"}`. Empty string means no overrides. App-level variables are refused in the region spec's raw keys; this is their only home. `deploy/worker-pod.yaml` carries the operator's production values. A typo'd override key fails every task at configure (burning attempts) rather than stopping the pod at startup, so check your values. |
 | `OXO_MIN_FREE_SCRATCH_BYTES` | 8 GiB | A ZL16 floor (peak observed scratch 3.33 GiB). Raise it when producing above ZL16: ZL17 projects to about 13 GiB. |
 
 The pod spec requests 6 GiB of memory: the documented budget for a ZL16 ortho worker (measured peak 4.81 GiB), in

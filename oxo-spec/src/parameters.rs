@@ -126,11 +126,19 @@ cover_airports_with_highres = "ICAO"
 
     #[test]
     fn skip_converts_is_serialised_in_both_states() {
-        let parameters: ProductionParameters =
-            toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
-        assert!(toml::to_string(&parameters)
-            .unwrap()
-            .contains("skip_converts = true"));
+        for (state, line) in [
+            (true, "skip_converts = true"),
+            (false, "skip_converts = false"),
+        ] {
+            let parameters: ProductionParameters = toml::from_str(&format!(
+                "provider = \"BI\"\nzoom = 16\nskip_converts = {state}\n"
+            ))
+            .expect("parse");
+            assert!(
+                toml::to_string(&parameters).unwrap().contains(line),
+                "{line}"
+            );
+        }
     }
 
     #[test]

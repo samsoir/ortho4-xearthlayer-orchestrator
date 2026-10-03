@@ -35,8 +35,8 @@ spec:
           value: "recycle"
         # Operational tuning of Ortho4XP's app-level variables: a JSON object
         # of variable name to STRING value, applied through each variable's
-        # owning module (design: worker-pod design, "App-level Ortho4XP
-        # variables" decision). They live here, never in the region spec's
+        # owning module (design: docs/specs/2026-10-02-worker-pod-design.md,
+        # the "App-level Ortho4XP variables" decision). They live here, never in the region spec's
         # raw keys, which the runner refuses. These are the operator's
         # production values; empty string means no overrides.
         - name: OXO_O4_APP_OVERRIDES
@@ -66,7 +66,8 @@ spec:
           mountPath: /var/oxo/content
           readOnly: true
         # Ortho4XP patches, always on: the image's Patches symlink points
-        # here. Flat per-tile layout, Ortho4XP's own, matched by coordinate;
+        # here. Block-nested layout, patches/<10° block>/<tile>/… (e.g.
+        # +50+000/+51+000), Ortho4XP's own, matched by coordinate;
         # the runner logs "patches: present|none for <tile>" per task.
         - name: patches
           mountPath: /var/oxo/patches-active
@@ -91,8 +92,10 @@ spec:
       hostPath:
         path: /EDIT/ME/oxo/content      # EDIT ME
         type: Directory
-    # Patches tree, read-only: flat per-tile layout (Ortho4XP's own), matched
-    # by coordinate, always on. An empty directory simply means no patches.
+    # Patches tree, read-only: block-nested layout patches/<10° block>/<tile>/…
+    # (e.g. +50+000/+51+000; Ortho4XP's own), matched by coordinate, always on.
+    # An empty directory simply means no patches, but it must EXIST before
+    # `kube play` (type: Directory).
     - name: patches
       hostPath:
         path: /EDIT/ME/oxo/patches      # EDIT ME

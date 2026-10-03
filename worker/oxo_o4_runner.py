@@ -51,6 +51,8 @@ APP_MODULES = {
 
 # The pod wires these itself (the overlay source is the pod's alone).
 POD_OWNED = ("custom_overlay_src", "custom_overlay_src_alternate")
+# Region intent: carried in the payload from the spec, never overridable.
+SPEC_OWNED = ("skip_converts",)
 
 
 def set_app_var(CFG, key, value):
@@ -79,7 +81,15 @@ def apply_app_level(CFG, config, overrides, raw):
     for k, v in overrides.items():
         if k in POD_OWNED:
             raise ValueError("app variable %r is wired by the pod and cannot be overridden" % k)
+        if k in SPEC_OWNED:
+            raise ValueError(
+                "app variable %r is region intent and belongs in the region spec, not the pod's overrides" % k
+            )
         if k not in CFG.cfg_app_vars:
+            if k in CFG.cfg_vars:
+                raise KeyError(
+                    "%r is a tile-level variable, not an app-level one; it belongs in the spec's raw" % k
+                )
             raise KeyError("unknown app-level variable %r in overrides" % k)
         set_app_var(CFG, k, convert_raw(CFG.cfg_vars, k, v))
 

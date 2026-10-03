@@ -21,6 +21,9 @@ struct Case {
     raw: serde_json::Value,
     skip_converts: bool,
     app_overrides: serde_json::Value,
+    /// Replace the wire value of `skip_converts`; `Some(Null)` omits the key
+    /// (the stale v1 payload shape).
+    skip_converts_wire: Option<serde_json::Value>,
     /// Create `Patches/<long_latlon>` in the install before running.
     patches_dir: Option<&'static str>,
 }
@@ -31,6 +34,7 @@ impl Default for Case {
             raw: serde_json::json!({"cover_zl":"14","clean_bad_geometries":"False","sea_texture_blur":"0.5","zone_list_like":"[1, 2]"}),
             skip_converts: true,
             app_overrides: serde_json::json!({}),
+            skip_converts_wire: None,
             patches_dir: None,
         }
     }
@@ -74,9 +78,17 @@ fn run_case(task_type: &str, tile: &str, envs: &[(&str, &str)], case: Case) -> O
         std::fs::create_dir_all(install.join("Patches").join(rel)).unwrap();
     }
     let log = work.path().join("calls.log");
+    let mut config = serde_json::json!({"v":2,"provider":"BI","zoom":16,"raw":case.raw,"target_root":"/x","skip_converts":case.skip_converts});
+    match case.skip_converts_wire {
+        Some(serde_json::Value::Null) => {
+            config.as_object_mut().unwrap().remove("skip_converts");
+        }
+        Some(v) => config["skip_converts"] = v,
+        None => {}
+    }
     let input = serde_json::json!({
         "tile": tile, "task_type": task_type,
-        "config": {"v":2,"provider":"BI","zoom":16,"raw":case.raw,"target_root":"/x","skip_converts":case.skip_converts},
+        "config": config,
         "install_root": install, "overlay_src": "/xp/Global Scenery",
         "app_overrides": case.app_overrides,
     });
@@ -493,6 +505,45 @@ fn a_tile_level_key_in_overrides_is_not_an_app_variable() {
         return;
     };
     assert_configure_failure(&o, "cover_zl");
+    let reason = last_json(&o.stdout)["reason"].as_str().unwrap().to_string();
+    assert!(reason.contains("tile-level"), "{reason}");
+    assert!(reason.contains("raw"), "{reason}");
+}
+
+#[test]
+fn skip_converts_in_overrides_is_refused_as_region_intent() {
+    let Some(o) = run_case(
+        "ortho",
+        "+50-002",
+        &[],
+        Case {
+            app_overrides: serde_json::json!({"skip_converts": "False"}),
+            ..Case::default()
+        },
+    ) else {
+        return;
+    };
+    assert_configure_failure(&o, "skip_converts");
+    let reason = last_json(&o.stdout)["reason"].as_str().unwrap().to_string();
+    assert!(reason.contains("spec"), "{reason}");
+}
+
+#[test]
+fn a_missing_or_non_bool_skip_converts_fails_in_configure() {
+    for wire in [serde_json::Value::Null, serde_json::json!("true")] {
+        let Some(o) = run_case(
+            "ortho",
+            "+50-002",
+            &[],
+            Case {
+                skip_converts_wire: Some(wire.clone()),
+                ..Case::default()
+            },
+        ) else {
+            return;
+        };
+        assert_configure_failure(&o, "skip_converts");
+    }
 }
 
 #[test]
