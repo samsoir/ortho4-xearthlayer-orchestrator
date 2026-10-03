@@ -45,6 +45,8 @@ pub enum PrepareError {
     TargetNotWritable { path: PathBuf, source: io::Error },
     #[error("bad tile {0:?}")]
     BadTile(String),
+    #[error("patches selector {0:?} is not a single path component")]
+    BadPatchesSet(String),
     #[error("patches set {path} is not a directory")]
     PatchesMissing { path: PathBuf },
     #[error("patches link {path}: {source}")]
@@ -147,6 +149,14 @@ fn set_patches_link(paths: &ExecPaths, patches: Option<&str>) -> Result<(), Prep
     };
     match patches {
         Some(set) => {
+            let mut comps = Path::new(set).components();
+            let single = matches!(
+                (comps.next(), comps.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            );
+            if !single || set.contains('/') {
+                return Err(PrepareError::BadPatchesSet(set.to_string()));
+            }
             let dest = paths.content.join("patches").join(set);
             if !dest.is_dir() {
                 return Err(PrepareError::PatchesMissing { path: dest });
@@ -328,21 +338,81 @@ mod tests {
         assert_eq!(block_of(9, 9), "+00+000");
     }
 
+    fn is_root() -> bool {
+        fs::read_to_string("/proc/self/status")
+            .map(|t| {
+                t.lines()
+                    .any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(2) == Some("0"))
+            })
+            .unwrap_or(false)
+    }
+
     #[test]
     fn an_unwritable_target_is_refused_naming_the_path() {
+        if is_root() {
+            return; // modes are ignored for root
+        }
         let e = env();
         fs::set_permissions(&e.target, fs::Permissions::from_mode(0o555)).unwrap();
-        let t = task(&e, "ortho", "+51+000", None);
-        let r = prepare(&t, &e.paths);
+        let r = prepare(&task(&e, "ortho", "+51+000", None), &e.paths);
         fs::set_permissions(&e.target, fs::Permissions::from_mode(0o755)).unwrap();
-        // root bypasses permission bits; only assert when the denial is real
-        if let Err(PrepareError::TargetNotWritable { path, .. }) = r {
-            assert_eq!(path, e.target);
-        } else if fs::write(e.target.join("x"), b"").is_ok() {
-            // running with privileges that ignore modes
-        } else {
-            panic!("expected TargetNotWritable");
+        match r {
+            Err(PrepareError::TargetNotWritable { path, .. }) => assert_eq!(path, e.target),
+            other => panic!("expected TargetNotWritable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_target_under_a_regular_file_is_refused_even_as_root() {
+        let e = env();
+        let file = e.target.join("file");
+        fs::write(&file, b"").unwrap();
+        let mut t = task(&e, "ortho", "+51+000", None);
+        t.config["target_root"] = json!(file.join("sub"));
+        assert!(matches!(
+            prepare(&t, &e.paths),
+            Err(PrepareError::TargetNotWritable { .. })
+        ));
+    }
+
+    #[test]
+    fn patch_selectors_that_escape_are_refused() {
+        let e = env();
+        for bad in ["../escape", "/etc", "a/b", ".", ".."] {
+            assert!(
+                matches!(
+                    prepare(&task(&e, "ortho", "+51+000", Some(bad)), &e.paths),
+                    Err(PrepareError::BadPatchesSet(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert!(fs::symlink_metadata(&e.paths.patches_link).is_err());
+    }
+
+    #[test]
+    fn the_patches_link_never_vanishes_during_a_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let e = env();
+        prepare(&task(&e, "ortho", "+51+000", Some("set-a")), &e.paths).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let missing = Arc::new(AtomicBool::new(false));
+        let (link, s2, m2) = (e.paths.patches_link.clone(), stop.clone(), missing.clone());
+        let poller = std::thread::spawn(move || {
+            while !s2.load(Ordering::Relaxed) {
+                if fs::symlink_metadata(&link).is_err() {
+                    m2.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        for i in 0..200 {
+            let set = if i % 2 == 0 { "set-b" } else { "set-a" };
+            prepare(&task(&e, "ortho", "+51+000", Some(set)), &e.paths).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        poller.join().unwrap();
+        assert!(!missing.load(Ordering::Relaxed), "link was absent mid-swap");
     }
 
     #[test]
@@ -438,8 +508,16 @@ mod tests {
         fs::write(d.join("+51+000.dsf"), b"ovl").unwrap();
     }
 
+    fn no_temporaries(dir: &Path) {
+        assert!(
+            names(dir).iter().all(|n| !n.starts_with(".oxo-tmp-")),
+            "{:?}",
+            names(dir)
+        );
+    }
+
     #[test]
-    fn ortho_egress_moves_the_whole_directory_without_temporaries() {
+    fn ortho_egress_copies_the_whole_directory_and_keeps_the_source() {
         let e = env();
         fabricate_ortho(&e);
         egress(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
@@ -450,28 +528,39 @@ mod tests {
             fs::read(d.join("Earth nav data/+50+000/+51+000.dsf")).unwrap(),
             b"dsf"
         );
+        let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
+        assert_eq!(fs::read(src.join("+51+000.mesh")).unwrap(), b"m");
     }
 
     #[test]
-    fn egress_is_repeatable_replacing_an_earlier_attempt() {
+    fn ortho_egress_replaces_a_stale_final_wholesale() {
         let e = env();
         fabricate_ortho(&e);
-        let t = task(&e, "ortho", "+51+000", None);
-        egress(&t, &e.paths).unwrap();
-        egress(&t, &e.paths).unwrap();
-        assert_eq!(names(&e.target), ["zOrtho4XP_+51+000"]);
+        let stale = e.target.join("zOrtho4XP_+51+000");
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("stale.txt"), b"old").unwrap();
+        fs::write(stale.join("+51+000.mesh"), b"old").unwrap();
+        egress(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
+        assert!(!stale.join("stale.txt").exists());
+        assert_eq!(fs::read(stale.join("+51+000.mesh")).unwrap(), b"m");
+        no_temporaries(&e.target);
     }
 
     #[test]
-    fn overlay_egress_creates_the_block_dir_and_moves_the_dsf() {
+    fn overlay_egress_replaces_a_stale_dsf_and_keeps_the_source() {
         let e = env();
         fabricate_overlay(&e);
-        let t = task(&e, "overlay", "+51+000", None);
-        egress(&t, &e.paths).unwrap();
-        egress(&t, &e.paths).unwrap();
         let d = e.target.join("yOrtho4XP_Overlays/Earth nav data/+50+000");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("+51+000.dsf"), b"old").unwrap();
+        egress(&task(&e, "overlay", "+51+000", None), &e.paths).unwrap();
         assert_eq!(names(&d), ["+51+000.dsf"]);
         assert_eq!(fs::read(d.join("+51+000.dsf")).unwrap(), b"ovl");
+        let src = e
+            .paths
+            .scratch
+            .join("yOrtho4XP_Overlays/Earth nav data/+50+000/+51+000.dsf");
+        assert_eq!(fs::read(src).unwrap(), b"ovl");
     }
 
     #[test]
@@ -487,23 +576,49 @@ mod tests {
     fn a_crash_between_copy_and_rename_leaves_no_final_named_partial() {
         let e = env();
         fabricate_ortho(&e);
-        // first half only: the process "dies" before commit
         let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
         let tmp = stage(&src, &e.target, "zOrtho4XP_+51+000").unwrap();
         assert!(!e.target.join("zOrtho4XP_+51+000").exists());
         assert_eq!(tmp.parent().unwrap(), e.target);
-        // second half completes it
+        assert!(
+            src.join("+51+000.mesh").exists(),
+            "stage must copy, not move"
+        );
         commit(&tmp, &e.target.join("zOrtho4XP_+51+000")).unwrap();
         assert!(!tmp.exists());
         assert_eq!(names(&e.target), ["zOrtho4XP_+51+000"]);
     }
 
     #[test]
-    fn a_failed_copy_removes_its_temporary() {
+    fn a_copy_failing_partway_removes_its_temporary_and_publishes_nothing() {
         let e = env();
-        let r = stage(&e.target.join("absent"), &e.target, "x");
-        assert!(r.is_err());
+        fabricate_ortho(&e);
+        let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
+        symlink("/nonexistent/oxo-dangling", src.join("zz-dangling")).unwrap();
+        assert!(stage(&src, &e.target, "zOrtho4XP_+51+000").is_err());
+        no_temporaries(&e.target);
+        let r = egress(&task(&e, "ortho", "+51+000", None), &e.paths);
+        assert!(matches!(r, Err(EgressError::Io { .. })));
         assert!(names(&e.target).is_empty());
+    }
+
+    #[test]
+    fn a_failed_commit_cleans_its_temporary_under_the_target_root() {
+        if is_root() {
+            return; // cannot make a removal fail as root
+        }
+        let e = env();
+        fabricate_ortho(&e);
+        let stale = e.target.join("zOrtho4XP_+51+000");
+        fs::create_dir_all(stale.join("locked")).unwrap();
+        fs::write(stale.join("locked/f"), b"x").unwrap();
+        fs::set_permissions(stale.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+        let r = egress(&task(&e, "ortho", "+51+000", None), &e.paths);
+        fs::set_permissions(stale.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(r, Err(EgressError::Io { .. })));
+        no_temporaries(&e.target);
+        let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
+        assert!(src.join("+51+000.mesh").exists());
     }
 
     #[test]
