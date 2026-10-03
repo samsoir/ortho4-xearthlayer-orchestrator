@@ -1538,6 +1538,7 @@ dependencies = [
  "oxo-control",
  "oxo-tasks",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
