@@ -85,10 +85,11 @@ def main(out):
 
 
 if __name__ == "__main__":
-    real_out = sys.stdout
-    sys.stdout = sys.stderr  # Ortho4XP prints; keep stdout for the result line
-    try:
-        code = main(real_out)
-    finally:
-        sys.stdout = real_out
+    # The result line gets its own descriptor; fd 1 (inherited by any
+    # subprocess Ortho4XP spawns, e.g. Triangle4XP) is pointed at stderr.
+    result_stream = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    code = main(result_stream)
+    result_stream.close()
     sys.exit(code)

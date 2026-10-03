@@ -193,3 +193,34 @@ fn bad_tile_is_a_failed_line_not_a_traceback() {
     assert_eq!(o.code, Some(1));
     assert_eq!(last_json(&o.stdout)["outcome"], "failed");
 }
+
+#[test]
+fn subprocess_chatter_on_inherited_fd1_cannot_pollute_the_result() {
+    let Some(o) = run("ortho", "+50-002", &[("FAKE_O4_NOISE", "1")]) else {
+        return;
+    };
+    assert_eq!(o.code, Some(0));
+    assert!(!o.stdout.contains("triangle chatter"), "{}", o.stdout);
+    assert_eq!(o.stdout.lines().count(), 1, "{}", o.stdout);
+    assert_eq!(last_json(&o.stdout)["outcome"], "ok");
+}
+
+#[test]
+fn provider_initialisation_failure_names_its_phase() {
+    let Some(o) = run(
+        "ortho",
+        "+50-002",
+        &[("FAKE_O4_FAIL", "initialize_providers_dict")],
+    ) else {
+        return;
+    };
+    assert_eq!(o.code, Some(1));
+    let j = last_json(&o.stdout);
+    assert_eq!(j["outcome"], "failed");
+    assert_eq!(j["phase"], "initialize_providers");
+    assert!(j["reason"]
+        .as_str()
+        .unwrap()
+        .contains("boom in initialize_providers_dict"));
+    assert!(calls(&o.log).is_empty());
+}

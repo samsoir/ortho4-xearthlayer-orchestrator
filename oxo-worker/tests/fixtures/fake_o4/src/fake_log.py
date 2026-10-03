@@ -1,7 +1,7 @@
 """Shared recorder/controller for the fake O4 tree, driven by env vars:
 FAKE_O4_LOG (file to append records to), FAKE_O4_FAIL (function name that
 raises), FAKE_O4_NOISE (print to stdout inside build functions)."""
-import os, sys
+import os, subprocess, sys
 
 
 def rec(line):
@@ -15,5 +15,6 @@ def enter(name):
     rec("call " + name)
     if os.environ.get("FAKE_O4_NOISE"):
         print("noise from " + name)
+        subprocess.call(["echo", "triangle chatter"])  # inherits fd 1
     if os.environ.get("FAKE_O4_FAIL") == name:
         raise RuntimeError("boom in " + name)
