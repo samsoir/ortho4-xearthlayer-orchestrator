@@ -1,0 +1,26 @@
+[package]
+name = "oxo-worker"
+description = "OXO worker supervisor: claims tasks over HTTP and drives the Ortho4XP runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# A reference client of the HTTP contract: no workspace crate in the
+# production graph.
+[dependencies]
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+oxo-control = { path = "../oxo-control" }
+oxo-tasks = { path = "../oxo-tasks" }
+axum = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
