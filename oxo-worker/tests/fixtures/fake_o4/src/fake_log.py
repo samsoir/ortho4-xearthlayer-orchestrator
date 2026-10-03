@@ -18,3 +18,10 @@ def enter(name):
         subprocess.call(["echo", "triangle chatter"])  # inherits fd 1
     if os.environ.get("FAKE_O4_FAIL") == name:
         raise RuntimeError("boom in " + name)
+
+
+def ret(name, ok=1):
+    """Return value of a fake build function: `ok` normally (the real ones
+    return 1 on success; build_masks returns None), 0 when
+    FAKE_O4_RETURN_ZERO names it."""
+    return 0 if os.environ.get("FAKE_O4_RETURN_ZERO") == name else ok

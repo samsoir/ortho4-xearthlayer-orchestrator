@@ -43,7 +43,7 @@ most of the spike's apparatus, so the spike runs as this sub-project's
 first phase instead of discarding a throwaway build. Its deliverables:
 
 - The image builds and one real tile is produced headless in a container:
-  **tile `+51+000`, provider `GOO` (Google), ZL16** — ortho task and
+  **tile `+51+000`, provider `GO2` (Google), ZL16** — ortho task and
   overlay task both, chosen by the operator so the first output is real.
 - Measured: wall-clock per build phase, peak memory (cgroup), peak scratch
   bytes, what landed in the DEM cache and whether a second run reuses it.
@@ -294,7 +294,7 @@ egress code is written.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Spike 0 | Folded in as phase 1, output recorded as the pod-contract document | Building the image is the spike's apparatus; a standalone spike would be thrown away. Operator-chosen fixture: `+51+000`, Google, ZL16. |
+| Spike 0 | Folded in as phase 1, output recorded as the pod-contract document | Building the image is the spike's apparatus; a standalone spike would be thrown away. Operator-chosen fixture: `+51+000`, `GO2` (Google), ZL16. |
 | Config transport | Topology at pod start; intent on the task, as an opaque job-level payload in the task store, delivered per claim | Pod-start-only breaks recycling (stale region config — operator ruling); the store is the only durable home; opacity keeps the port generic. |
 | Payload in idempotency | A differing payload is `JobConflict` | Resuming under silently-changed parameters is the lie `JobConflict` exists to prevent; closes a real hole. |
 | Image contents | Tools, never data | Global Scenery and friends are large and deployment-specific (operator ruling); everything reaches the pod as mounts whose backing store OXO never sees. |
@@ -322,6 +322,9 @@ egress code is written.
 - **Per-tile resource estimation.** Unchanged: the capacity check stays a
   task-type filter plus a free-scratch threshold until the spike's
   numbers exist; a footprint column and claim predicate remain additive.
+- **Texture-bytes sanity floor.** A floor on texture bytes before egress
+  remains the only detector for the bad-provider silently-degraded success
+  (pod-contract section g); deferred.
 
 ## Out of scope
 

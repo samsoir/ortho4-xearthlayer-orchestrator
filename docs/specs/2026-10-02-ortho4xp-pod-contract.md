@@ -137,8 +137,15 @@ egress code):
   with `file Earth nav data/<block>/<tile>.dsf absent` and
   `build_overlay` returns 0 (its *success* value is 1) — no exception,
   no exit code. The runner treats a falsy return as failure for overlay
-  tasks. The ortho path logs the same absence while extracting rasters
-  and continues.
+  tasks and for each ortho build step, stopping at the first failure and
+  reporting `<fn> returned <r>` with that function as the phase. The
+  convention is per function: `build_poly_file`, `build_mesh`,
+  `build_tile` and `build_overlay` return 1 on success and 0 on every
+  handled failure, so any falsy result fails. `build_masks` is the
+  exception: it ends in a bare `return` (None) on success and returns 0
+  only on its failure paths, so None counts as success there and only a
+  falsy non-None result fails. The ortho path logs the same absence while
+  extracting rasters and continues.
 - **No network (probed, `--network none`):** `build_poly_file` stalls
   **silently** — for the probe's whole lifetime (several minutes before
   it was cut off) the process produced exactly one log line (the
