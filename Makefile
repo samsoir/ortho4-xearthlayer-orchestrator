@@ -69,3 +69,7 @@ verify-db: ## Run the conformance suite against a real PostgreSQL
 	$(MAKE) pg-up
 	DATABASE_URL=$(PG_TEST_URL) $(CARGO) test --package oxo-tasks-postgres --all-features; \
 	status=$$?; $(MAKE) pg-down; exit $$status
+
+.PHONY: image
+image: ## Build the worker pod image (podman)
+	podman build -t oxo-worker:dev -f worker/Containerfile .
