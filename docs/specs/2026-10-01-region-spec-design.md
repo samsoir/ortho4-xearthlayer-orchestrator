@@ -353,5 +353,5 @@ actually wanted.
 - [OXO architecture design](2026-10-01-oxo-architecture-design.md) --
   the execution model, the decomposition, and the decisions this
   sub-project inherits.
-- `README.md` -- the high-level specification, including the
+- `2026-10-01-oxo-high-level-design.md` -- the high-level specification, including the
   requirement that a specification carry failure policy.

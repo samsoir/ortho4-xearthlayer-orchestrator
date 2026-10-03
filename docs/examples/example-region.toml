@@ -1,0 +1,92 @@
+# Example OXO region specification, derived from config/Ortho4XP.cfg
+# (the operator's production tuning as of 2026-10-02).
+#
+# This is what `oxo-spec validate` checks and what POST /api/v1/jobs
+# accepts. Copy it per region, then edit: tiles, metadata, provider,
+# zoom, and target.root. (Patches need no per-region setting — the pod
+# mounts the whole tree and Ortho4XP matches by tile coordinate.)
+#
+# Paths are CONTAINER paths: target.root must exist inside the worker
+# pod, i.e. the artifacts volume (NAS output/) is mounted such that
+# this path resolves. See deploy/worker-pod.yaml.
+#
+# NOTE: application-level Ortho4XP settings from Ortho4XP.cfg do not
+# belong in [parameters.raw] (the worker refuses them loudly). The
+# overlay source is wired by the pod; skip_converts is the spec field
+# above; operational tuning (max_download_slots, http_timeout, retries,
+# ovl_exclude_*) lives in the pod's OXO_O4_APP_OVERRIDES env — see
+# deploy/worker-pod.yaml. Patches are always on: the pod mounts the
+# NAS patches tree (block-nested, patches/<block>/<tile>/) read-only,
+# and Ortho4XP picks patches by tile coordinate automatically.
+
+tiles = [
+    # One entry per 1x1-degree tile, "±DD±DDD". Example: the spike tile.
+    "+51+000",
+]
+
+[metadata]
+name = "Example Region"
+region_code = "EX"
+revision = 1
+
+[parameters]
+# Chosen per region; GO2 (Google) at ZL16 is what the spike measured.
+provider = "GO2"
+zoom = 16
+include_overlays = true
+# skip_converts defaults to true (XEL generates DDS at runtime). Set to
+# false only for testing or non-XEL scenery production.
+# skip_converts = false
+
+[parameters.raw]
+# Tile-level Ortho4XP keys, verbatim from config/Ortho4XP.cfg.
+# Values are strings; the worker converts each through Ortho4XP's own
+# declared type (bools/lists must be canonical Python literals).
+apt_smoothing_pix = "8"
+road_level = "1"
+road_banking_limit = "0.5"
+lane_width = "4.0"
+max_levelled_segs = "200000"
+water_simplification = "0.0"
+min_area = "0.001"
+max_area = "200.0"
+clean_bad_geometries = "False"
+mesh_zl = "19"
+curvature_tol = "2.0"
+apt_curv_tol = "0.5"
+apt_curv_ext = "0.5"
+coast_curv_tol = "1.0"
+coast_curv_ext = "0.5"
+limit_tris = "3.0"
+min_angle = "10.0"
+sea_smoothing_mode = "zero"
+water_smoothing = "10"
+iterate = "0"
+mask_zl = "16"
+masks_width = "[10,20,30]"
+masking_mode = "3steps"
+use_masks_for_inland = "True"
+imprint_masks_to_dds = "False"
+distance_masks_too = "False"
+masks_use_DEM_too = "False"
+cover_airports_with_highres = "ICAO"
+cover_extent = "0.5"
+cover_zl = "18"
+sea_texture_blur = "0.0"
+water_tech = "XP12"
+ratio_water = "0.25"
+ratio_bathy = "0.25"
+normal_map_strength = "1.0"
+terrain_casts_shadows = "True"
+overlay_lod = "25000.0"
+use_decal_on_terrain = "False"
+fill_nodata = "True"
+# masks_custom_extent and custom_dem were empty in Ortho4XP.cfg
+# (defaults) and are omitted.
+
+[target]
+root = "/srv/oxo/artifacts/EX"
+
+[failure_policy]
+max_attempts = 3
+backoff_seconds = 60

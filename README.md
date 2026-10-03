@@ -1,173 +1,133 @@
-# Ortho4 XEarthLayer Orchestrator (OXO)
+# OXO — Ortho4 XEarthLayer Orchestrator
 
-# Problem
+Automated production of [XEarthLayer](https://github.com/samsoir/xearthlayer) regional orthoscenery for X-Plane, by orchestrating [Ortho4XP](https://github.com/oscarpilote/Ortho4XP).
 
-XEarthLayer is a streaming orthoscenery provider for the X-Plane flgiht
-simulator. XEarthLayer depends upon regional scenery packages in order to
-provide the correct orthographic textures and mesh for the entire globe. These
-resources are provided by Ortho4XP.
+> **Status: 0.1, pre-release.** The specification, control plane and worker pod work end to end (a first production region has been built with them), but interfaces may still change before 1.0.
 
-Due to the scale of the globe, producing orthographic scenery that covers the
-entire planet takes many weeks, and requires a lot of manual orchestration tasks
-to ensure all of the tiles are processed and then packaged effectively, while
-ensuring that each machine producing tiles has enough disk space and memory
-available to successfully complete the task. This requires a significant
-investement of time from the operator while having multiple failure modes due to
-memory and disk pressure, network failures, operating system updates and other
-factors beyond the direct control of the manual operator.
+## What It Does
 
-This project will provide a control plane for this task, to automate the work
-for producing XEarthLayer scenery packages, using existing tools;
-ortho4xp and the xearthlayer-pubisher binaries.
+XEarthLayer streams satellite imagery into X-Plane, but it needs regional scenery packages to know *where* the terrain is. Ortho4XP produces that scenery, one 1×1° tile at a time. Covering a continent means thousands of tiles and weeks of work, with disk pressure, memory pressure, network failures and reboots all able to kill a tile part-way through. Doing that by hand is a full-time job.
 
-# High Level Design
+OXO turns it into a submit-and-wait operation:
 
-The high level concept for the design of this system revolves around three
-phases of scenery package creation;
+1. You describe a **region** as a list of 1×1° tiles, plus the Ortho4XP settings to use.
+2. OXO splits it into **tasks** and serves them to a fleet of worker pods.
+3. The workers build the tiles, retry failures, and deliver the results to a target location.
+4. OXO tells you when the region is complete.
 
-1. **Regional Scenery Package specification** - defining the geographic region, 
-   providing the name and metadata about the region, and parameters for
-   compilation (where should files go, etc.)
-2. **Regional Scenery Production** - Actual work to create the tiles for the
-   scenery itself. This is where `Ortho4XP` produces the actual Ortho tiles and
-   the associated overlays. The production work should be done at the tile level
-   atomically, that is to say that the work to produce a 1x1 degree tile include
-   overlays is completed as a single-shot exeuction in isolation. Succcessive
-   atomic work (or tasks) is completed in order to provide tiles for a region.
-3. **Regional Scenery Package compilation** - Once all of the required tiles for
-   a specific region have been completed successfully to specification, the
-   tiles are compiled into the final regional scenery package for publication
-   for XEarthLayer using the `xearthlayer-publish` tools.
+OXO orchestrates; it does not reimplement. Ortho4XP still builds every tile, and OXO does not compile or publish the final package (that stays with `xearthlayer-publish` and your own tooling).
 
-## Regional Scenery Package Specification
+## How It Works
 
-The specification of scenery packages defines all of the necessary details
-needed for an orchestrator to manage the lifecyle of work required to complete
-the scenery package.
+```
+ region spec (TOML)
+        │  POST /api/v1/jobs
+        ▼
+┌─────────────────┐   claims / heartbeats / results (HTTP)   ┌──────────────────┐
+│  oxo-controld   │◄─────────────────────────────────────────│  worker pod(s)   │
+│  planner + API  │                                          │  oxo-worker      │
+│  + reaper       │                                          │   └─ Ortho4XP    │
+└────────┬────────┘                                          └────────┬─────────┘
+         │ TaskStore port                                             │ deliverable
+         ▼                                                            ▼
+    PostgreSQL                                                 artifacts volume
+```
 
-A regional scenery package needs to fulfill the requirementss of the regional
-scenery package and associated library as defined in the main xearthlayer.app
-specification.
+- **A job is a region; a task is one tile.** The planner turns *N* tiles into up to 2*N* tasks: an *ortho* task and, optionally, an *overlay* task per tile. Submitting the same specification again resumes the existing job rather than starting a new one.
+- **Dispatch is pull.** A worker checks it has room (scratch space), claims a task over HTTP, builds it, heartbeats while it works, and reports. Disk pressure throttles the system with no central scheduler, and a reaper reclaims tasks from workers that go quiet.
+- **Workers are stateless pods.** Configuration travels with the task and workers hold none, so they cannot drift apart. The same pod spec runs under Podman or Kubernetes, and the platform decides how many to run.
+- **Failure is detected honestly.** Ortho4XP exits 0 even when it fails, so the worker drives its build functions directly and reports real success or failure.
+- **The deliverable is the XEarthLayer tile**: the DSF, terrain descriptors and mask PNGs (about 64 MB per tile). Textures are generated at runtime by XEarthLayer, so imagery is never kept.
 
-In summary, regional scenery package contains a collection of one or more 1x1
-degree orthographic tiles that are compatible with X-Plane. A region is usually
-part or all of a continent, such as North Amercia (NA) or Oceania (OC).
+The full reasoning is in the [architecture design](docs/specs/2026-10-01-oxo-architecture-design.md).
 
-The definition of regions area is controlled by specifying each and every 1x1
-degree tile. Therefore a region is an enumeration / collection of 1x1 degree
-tiles. Each of the tiles defined in the scenery package specifciation will
-result in one piece of atomic work to process. Beyond the specification of the
-geographic area, the other configuration parameters for a regional scenery
-package will include;
-- the parameters that Ortho4XP requires to complete the package (Ortho4XP.cfg)
-- file system specification on where to fine xplane global/demo scenery
-- where to place the completed resoures, ortho and overlay tiles
-- failure policies for retries and alerting should a tile fail to process
+## Getting Started
 
-Once the regional scenery package specification is completed and validated, it
-can be submitted to the production phase for processing.
+### Requirements
 
-## Regional Scenery Production
+- **Rust** 1.75 or newer ([rustup](https://rustup.rs/))
+- **Podman** (or any OCI runtime that can run a pod) for PostgreSQL and the worker image
+- For real production: X-Plane's global scenery on disk (Ortho4XP reads it for overlays), enough disk for DEM data, and fast, reliable access to your chosen imagery provider and an Overpass server
 
-Production of the regional scenery package requires two distinct components. The
-first is the plan for the work. Using the specification provided by the
-specification phase, the production phase needs to atomize the work into
-individual tasks that can be processed. The second component is the work to
-produce the tiles themselves, which should be a single task that any capable
-worker can pick up, process the specification for the tile provided, return the
-artifacts produced to the specified location and exit cleanly, prepare for a new
-task.
+### Build and verify
 
-At a high level, the production phase should start by splitting the
-specification into _N_ tasks, which each task representing the work to produce a
-single 1x1 tile (including the overlays optionally). The task can then be
-committed to by a separate process that understands how to complete the task
-successfully.
+```bash
+git clone https://github.com/samsoir/ortho4-xearthlayer-orchestrator.git
+cd ortho4-xearthlayer-orchestrator
+make verify    # format check, clippy, tests
+make help      # every target
+```
 
-The work itself will be completed by Ortho4XP, likely running in a container
-that lives for the lifecyle of the task itself before terminating. The runtime
-for the container is not decided, but the design of the system should be able to
-support simpler container runtimes such as Podman, as well as bigger more
-sophisticated kubernetes fleets. Kubernetes is not a requirement up front, but
-longer term a first class k8s operator is a reasonable goal for this project.
+### Validate a region specification
 
-The production step needs to be able to maange and orchestrate the dependencies
-for the work to be compeleted sucessfully, which includes tasks such as;
+```bash
+cargo run -p oxo-spec-cli -- validate docs/examples/example-region.toml
+cargo run -p oxo-spec-cli -- show     docs/examples/example-region.toml
+```
 
-- Ensure the configuration provided is valid
-- The configuration resources defined are reachable and staged effectively
-- stage file system mounts to ensure the input of global scenery and output or
-  completed tile resources can be completed successfully
-- observability and telemetry is being exported to any defined outputs
+[`docs/examples/example-region.toml`](docs/examples/example-region.toml) is a commented starting point. Copy it per region and edit the tiles, metadata, provider, zoom and `target.root`.
 
-The lifecyle of a particular container is largely expected to only live for the
-length of each 1x1 task that is being completed. However, there are tradeoffs
-with this design and there may be usecases for having longer lived containers
-where the orchestration system has less control over the process management of a
-system - i.e. K8s can control spec scale as needed, podman is an atomic runtime
-that would need additional controllers to manage process scaling / lifecyle.
+### Run the control plane
 
-As a concrete implementation, the first usage of this system will be on the
-authors home network, with 3-4 nodes, each capable of running 4-8 containers
-concurrently each. These nodes are not part of a k8s cluster, so they will be
-running local containers that should be able to start and automatically connect
-to the control plane in order to do work. The containers should only know how to
-do work provided to them, so there needs to be a controller on each node to
-coordinate the work itself per node. This needs to be factored into the design
-of this system, but the design should be compatible / interchangable with a k8s
-operator model for future cloud based processing.
+```bash
+podman run -d --name oxo-postgres -e POSTGRES_PASSWORD=<password> \
+  -v oxo-pg-data:/var/lib/postgresql/data -p 5432:5432 \
+  docker.io/library/postgres:17-alpine
 
-## Regional Scenery Package compilition
+DATABASE_URL='postgres://postgres:<password>@127.0.0.1:5432/postgres' \
+  cargo run --release -p oxo-controld -- --bind 0.0.0.0:8080
+```
 
-The final stage of regional scenery package production is compiling the final
-XEarthLayer regional scenery package using the `xearthlayer-publish` tools
-provided with the project. This part of the process should happen on a single
-node that has access to the working xearthlayer scenery package library.
+Migrations run at startup. `oxo-controld --help` lists every flag and its environment variable. The API has **no authentication in v1**; run it on a trusted network only.
 
-The compilation process should only happen once all of the required tasks for a
-regional scenery package have completed successfully and constitute the final
-stage of this process.
+### Run a worker
 
-# Non-goals
+```bash
+make image                                   # builds oxo-worker:dev
+$EDITOR deploy/worker-pod.yaml               # fill in every line marked EDIT ME
+podman kube play deploy/worker-pod.yaml
+```
 
-- Create a bespoke distributed compute platform in order to fulfill these
-  requirements. This project should use existing open source frameworks in order
-  to deliver on the requirements.
-- Create a bespoke job or task management system in order to fulfill these
-  requirements. Simiar to above.
-- Create a bespoke ortho tile processing system. Ortho4XP works fine for this
-  task.
-- Implement publishing functions in the early versions, may be a later
-  requirement.
+The pod spec lists the four volumes a worker needs (DEM cache, X-Plane content, patches, artifacts) and the control plane URL. See [`worker/README.md`](worker/README.md) for the mount-point contract.
 
-# Engineering Principles
+### Submit a region and watch it
 
-Strict conformance to SOLID principles in the design and architecture of this
-software.
+```bash
+curl -s --data-binary @docs/examples/example-region.toml \
+  http://127.0.0.1:8080/api/v1/jobs
 
-All work is specified first with a failing test defining the expected behavior
-(a spec), and then implemented against that test. Standard TDD red green
-refactor development process.
+curl -s http://127.0.0.1:8080/api/v1/jobs/<job_id>              # status
+curl -s http://127.0.0.1:8080/api/v1/jobs/<job_id>/throughput   # claim / completion / failure counts
+```
 
-Acceptance criteria is defined up front and aligned upon between the all parties
-responsible for the work. A common accessible DSL should be used for sharing
-requirements. For this project, Gherkin will be used for the specification of
-the project functions, allowing for automated acceptance testing using a
-suitable gherkin/cucumber framework.
+When the job reports `complete`, the tiles are in the specification's `target.root`.
 
-Server components should be written in Rust wherever possible, except where this
-would have direct conflict with another pre-requisit dependency, i.e. Ortho4XP
-is written Python, many distributed compute frameworks are written in Go.
+## Documentation
 
-Web/front end should use HTML5, CSS and Javascript that is well structured and
-conforms to modern WCAG design principles.
+| Document | What it covers |
+|---|---|
+| [Architecture design](docs/specs/2026-10-01-oxo-architecture-design.md) | The source of truth: execution model, decisions, rejected alternatives, sub-project decomposition |
+| [High level design](docs/specs/2026-10-01-oxo-high-level-design.md) | The original problem statement and three production phases |
+| [Region specification](docs/specs/2026-10-01-region-spec-design.md) | The specification model and its validation rules |
+| [Job server](docs/specs/2026-10-01-job-server-design.md) | The task-state port and its PostgreSQL adapter |
+| [Control plane](docs/specs/2026-10-02-control-plane-design.md) | The planner, HTTP API and reaper |
+| [Worker pod](docs/specs/2026-10-02-worker-pod-design.md) | The worker, the runner and the pod image |
+| [Ortho4XP pod contract](docs/specs/2026-10-02-ortho4xp-pod-contract.md) | Measured resource and behaviour facts about Ortho4XP in a pod |
+| [Worker image](worker/README.md) | The image's mount-point contract and configuration |
+| [Implementation plans](docs/plans/) | How each sub-project was built |
 
-# Contributing
+## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and standards,
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations, and
-[SECURITY.md](SECURITY.md) for reporting vulnerabilities privately.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and standards (TDD, SOLID, Gherkin acceptance criteria, `make pre-commit`), and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described in [SECURITY.md](SECURITY.md). For questions and live conversation, join us on [Discord](https://discord.gg/RPEWQZdxm2).
 
-# License
+## Credits
+
+OXO exists to feed [XEarthLayer](https://github.com/samsoir/xearthlayer), and does its tile production with [Ortho4XP](https://github.com/oscarpilote/Ortho4XP) by Oscar Pilote. The worker image builds the [Shred86 fork of Ortho4XP](https://github.com/Shred86/Ortho4XP), pinned to an exact commit.
+
+Developed with assistance from [Claude](https://claude.ai) by Anthropic.
+
+Made with :heart: in California.
+
+## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE) for details.

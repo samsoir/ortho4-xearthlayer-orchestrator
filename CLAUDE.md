@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-The repository holds a Cargo workspace alongside the documents it was planned from: `README.md` (the high-level specification), `docs/specs/` (design documents and decision records), and `docs/plans/` (implementation plans).
+The repository holds a Cargo workspace alongside the documents it was planned from: `docs/specs/2026-10-01-oxo-high-level-design.md` (the high-level specification), `docs/specs/` (design documents and decision records), and `docs/plans/` (implementation plans).
 
 Workspace members (`Cargo.toml`, edition 2021, `rust-version` 1.75):
 
@@ -37,7 +37,7 @@ Currently passing (transcribed from fresh runs): `make verify` runs 285 Rust tes
 Also note:
 
 - `docs/specs/2026-10-01-oxo-architecture-design.md` is **the source of truth for architecture and decisions**. Read it before proposing any design or code. Where a sub-project design contradicts it, that document is wrong and must be amended rather than silently diverged from.
-- `README.md` states the problem and the three production phases. It predates the architecture document and is not updated by it; where they differ on execution details, the architecture document governs.
+- `docs/specs/2026-10-01-oxo-high-level-design.md` states the problem and the three production phases. It predates the architecture document and is not updated by it; where they differ on execution details, the architecture document governs.
 
 ## What This System Is
 
@@ -86,7 +86,7 @@ No bespoke distributed compute platform, job or task management system, or ortho
 
 ## Engineering Principles (binding)
 
-From `README.md`, and not optional:
+From `docs/specs/2026-10-01-oxo-high-level-design.md`, and not optional:
 
 - **TDD, strictly**: every change starts with a failing test specifying the expected behaviour. Red → green → refactor.
 - **SOLID**: strict conformance in design and architecture.

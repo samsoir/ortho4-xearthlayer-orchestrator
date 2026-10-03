@@ -2,7 +2,7 @@
 
 The system-level architecture for the Ortho4 XEarthLayer Orchestrator
 (OXO), and the decision record for the choices every sub-project
-inherits. `README.md` states the problem and the three production
+inherits. `2026-10-01-oxo-high-level-design.md` states the problem and the three production
 phases; this document fixes the execution model, the component
 boundaries and the decomposition, and does not restate the README.
 v1 covers phases 1 and 2 -- specification and production. Phase 3,
@@ -480,6 +480,6 @@ than one tile, so this re-downloads it for every task in a region.
 
 ## Related
 
-- `README.md` -- problem statement, the three production phases,
+- `2026-10-01-oxo-high-level-design.md` -- problem statement, the three production phases,
   non-goals and engineering principles.
 - `CLAUDE.md` -- orientation for future sessions.
