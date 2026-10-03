@@ -32,7 +32,7 @@ pub(crate) async fn claim(
         })
         .await?;
     Ok(match claimed {
-        Some(task) => (StatusCode::OK, Json(ClaimedTaskBody::from(task))).into_response(),
+        Some(task) => (StatusCode::OK, Json(ClaimedTaskBody::try_from(task)?)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     })
 }
@@ -124,6 +124,23 @@ mod tests {
         assert!(["+50-002", "+51-002"].contains(&body["tile"].as_str().unwrap()));
         assert!(["ortho", "overlay"].contains(&body["task_type"].as_str().unwrap()));
         assert_eq!(body["attempt"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_claim_carries_the_submitted_specs_config() {
+        let app = app();
+        post_toml(&app, "/api/v1/jobs", SPEC).await;
+        let (_, body) = post_json(&app, "/api/v1/claims", json!({"worker": "w1"})).await;
+        assert_eq!(
+            body["config"],
+            json!({
+                "v": 1,
+                "provider": "BI",
+                "zoom": 16,
+                "raw": {},
+                "target_root": "/srv/oxo/artifacts/NA",
+            })
+        );
     }
 
     #[tokio::test]
