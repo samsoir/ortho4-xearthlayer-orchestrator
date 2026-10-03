@@ -1,5 +1,9 @@
 # OXO — Ortho4 XEarthLayer Orchestrator
 
+<p align="center">
+  <img src="docs/images/oxo-cube.png" alt="The OXO cube: a red cube showing an X on top and an O on each side" width="240">
+</p>
+
 Automated production of [XEarthLayer](https://github.com/samsoir/xearthlayer) regional orthoscenery for X-Plane, by orchestrating [Ortho4XP](https://github.com/oscarpilote/Ortho4XP).
 
 > **Status: 0.1, pre-release.** The specification, control plane and worker pod work end to end (a first production region has been built with them), but interfaces may still change before 1.0.
