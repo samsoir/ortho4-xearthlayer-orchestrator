@@ -25,6 +25,9 @@ pub struct CreateJob {
     pub max_attempts: MaxAttempts,
     pub backoff: BackoffSeconds,
     pub tasks: Vec<TaskSpec>,
+    /// Opaque to the store: snapshotted at creation, returned with every
+    /// claim, and compared on resume like the failure policy.
+    pub worker_payload: String,
 }
 
 /// Recover a job's identity from `(region_code, revision)`.
@@ -69,6 +72,8 @@ pub struct ClaimedTask {
     pub task_type: TaskType,
     /// Which start this is, counting from 1.
     pub attempt: u32,
+    /// The job's worker payload, exactly as it was created.
+    pub worker_payload: String,
 }
 
 /// Proof that the caller holds a task.
@@ -181,6 +186,7 @@ mod tests {
                     task_type: TaskType::Overlay,
                 },
             ],
+            worker_payload: String::new(),
         };
         assert_eq!(request.tasks.len(), 2);
         assert_eq!(request.tasks[0].tile, request.tasks[1].tile);

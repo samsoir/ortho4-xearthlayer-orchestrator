@@ -65,6 +65,7 @@ pub fn two_task_job() -> CreateJob {
                 task_type: TaskType::Overlay,
             },
         ],
+        worker_payload: String::new(),
     }
 }
 
@@ -83,6 +84,7 @@ pub fn one_task_job() -> CreateJob {
             tile: tile(50, -2),
             task_type: TaskType::Ortho,
         }],
+        worker_payload: String::new(),
     }
 }
 
@@ -872,6 +874,47 @@ pub async fn resuming_a_job_with_a_different_policy_is_a_conflict(fixture: &dyn 
     }
 }
 
+/// The payload is opaque to the store and handed back byte-equal on a claim.
+pub async fn a_claim_carries_the_jobs_worker_payload(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let mut job = one_task_job();
+    job.worker_payload = "{\"v\":1}".to_string();
+    subject.store.create_job(job).await.expect("create");
+
+    let claimed = subject
+        .store
+        .claim(any_task("pod"))
+        .await
+        .expect("claim")
+        .expect("one task is pending");
+    assert_eq!(claimed.worker_payload, "{\"v\":1}");
+}
+
+/// The payload arm of `JobConflict`: identical in every other respect, a
+/// different payload would resume the job under changed parameters.
+pub async fn resuming_with_a_different_worker_payload_is_a_conflict(fixture: &dyn Fixture) {
+    let subject = fixture.fresh().await;
+    let mut original = two_task_job();
+    original.worker_payload = "{\"v\":1}".to_string();
+    subject.store.create_job(original).await.expect("create");
+
+    let mut changed = two_task_job();
+    changed.worker_payload = "{\"v\":2}".to_string();
+    let error = subject
+        .store
+        .create_job(changed)
+        .await
+        .expect_err("a changed payload must conflict");
+    assert!(
+        matches!(
+            &error,
+            TaskStoreError::JobConflict { region_code, revision }
+                if region_code == "NA" && *revision == 1
+        ),
+        "expected JobConflict for NA revision 1, got {error:?}"
+    );
+}
+
 pub async fn two_revisions_of_one_region_are_separate_jobs(fixture: &dyn Fixture) {
     let subject = fixture.fresh().await;
     let first = subject
@@ -1061,6 +1104,11 @@ macro_rules! conformance_suite {
         $crate::conformance_case!(
             $fixture,
             resuming_a_job_with_a_different_policy_is_a_conflict
+        );
+        $crate::conformance_case!($fixture, a_claim_carries_the_jobs_worker_payload);
+        $crate::conformance_case!(
+            $fixture,
+            resuming_with_a_different_worker_payload_is_a_conflict
         );
         $crate::conformance_case!($fixture, two_revisions_of_one_region_are_separate_jobs);
         $crate::conformance_case!($fixture, a_task_set_matches_regardless_of_order);
