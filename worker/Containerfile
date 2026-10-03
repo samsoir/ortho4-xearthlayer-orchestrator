@@ -42,4 +42,6 @@ WORKDIR /opt/ortho4xp
 
 COPY --from=builder /src/target/release/oxo-worker /opt/oxo/oxo-worker
 COPY worker/oxo_o4_runner.py /opt/oxo/oxo_o4_runner.py
+# The supervisor execs the runner directly; do not trust the checkout's mode.
+RUN chmod 755 /opt/oxo/oxo_o4_runner.py
 ENTRYPOINT ["/opt/oxo/oxo-worker"]

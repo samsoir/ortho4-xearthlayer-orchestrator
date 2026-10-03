@@ -203,6 +203,48 @@ async fn a_recycle_worker_drains_a_two_task_job() {
     );
 }
 
+/// Characterization of the production spawn path: the supervisor execs the
+/// runner directly, so a script with a shebang and the exec bit and NO
+/// interpreter prefix must run to a completed task. (The first end-to-end
+/// run died with EACCES because the real runner was mode 644; every other
+/// test here goes through fixtures whose bits were already right.)
+#[tokio::test]
+async fn a_shebang_runner_is_exec_d_directly_and_completes_a_task() {
+    let env = env_with(|s| {
+        s.replace(
+            r#"tiles = ["+50-002", "+51-002"]"#,
+            r#"tiles = ["+50-002"]"#,
+        )
+    })
+    .await;
+    let scratch = env.scratch().display().to_string();
+    let runner = env.root().join("runner.py");
+    std::fs::write(
+        &runner,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys
+tile = json.loads(sys.stdin.readline())["tile"]
+d = "{scratch}/Tiles/zOrtho4XP_" + tile
+os.makedirs(d + "/terrain")
+os.makedirs(d + "/Earth nav data/+50+000")
+open(d + "/Earth nav data/+50+000/" + tile + ".dsf", "w").write("dsf")
+open(d + "/terrain/tile.ter", "w").write("built")
+print(json.dumps({{"outcome": "ok"}}))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = env.config(&runner.to_string_lossy(), "stop", 0);
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::TaskDone
+    );
+    assert_eq!(env.job_state().await["state"], "complete");
+}
+
 #[tokio::test]
 async fn stop_mode_takes_exactly_one_task() {
     let env = env_with(|s| s).await;
