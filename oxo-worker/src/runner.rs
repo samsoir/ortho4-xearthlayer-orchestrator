@@ -83,17 +83,39 @@ pub struct TaskRun {
     pgid: Option<u32>,
 }
 
+/// Linux errno 26; `ErrorKind::ExecutableFileBusy` is newer than our MSRV.
+const ETXTBSY: i32 = 26;
+
+/// Spawn the runner, tolerating ETXTBSY. A script written moments before
+/// being executed can still have its write fd inherited by a concurrently
+/// forked child in another thread (tests do exactly this), and exec then
+/// fails with "text file busy" until that child execs. The window is
+/// microseconds, so a few short retries is the standard remedy.
+fn spawn_with_retry(cmd: &str) -> io::Result<Child> {
+    let mut attempt = 0;
+    loop {
+        let spawned = Command::new(cmd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            // Its own group, so a kill reaches Ortho4XP's subprocesses
+            // (DSFTool and friends) and not only the direct child.
+            .process_group(0)
+            .spawn();
+        match spawned {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Spawn `cmd`, hand it `input` on stdin, and return the supervised handle.
 pub async fn run_task(cmd: &str, input: &RunnerInput) -> io::Result<TaskRun> {
-    let mut child = Command::new(cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        // Its own group, so a kill reaches Ortho4XP's subprocesses
-        // (DSFTool and friends) and not only the direct child.
-        .process_group(0)
-        .spawn()?;
+    let mut child = spawn_with_retry(cmd)?;
     let pgid = child.id();
 
     let mut line = serde_json::to_vec(input).map_err(io::Error::other)?;
