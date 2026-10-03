@@ -47,8 +47,9 @@ def main(out):
         import O4_Overlay_Utils as OVL
         import O4_Config_Utils as CFG  # last: it modifies other modules' variables
 
-        # Both task types read X-Plane's Global Scenery.
-        CFG.custom_overlay_src = inp["overlay_src"]
+        # Both task types read X-Plane's Global Scenery. The variable lives in
+        # O4_Overlay_Utils (O4_Cfg_Vars binds it to OVL), not in CFG.
+        OVL.custom_overlay_src = inp["overlay_src"]
 
         phase = "initialize_providers"
         IMG.initialize_extents_dict()
