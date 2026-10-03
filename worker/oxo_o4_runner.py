@@ -39,6 +39,61 @@ def convert_raw(cfg_vars, key, value):
     return typ(value)
 
 
+# Owning-module aliases, as Ortho4XP.py and O4_Config_Utils.py import them,
+# keyed by the "module" binding in O4_Cfg_Vars.cfg_app_vars.
+APP_MODULES = {
+    "UI": "O4_UI_Utils",
+    "OSM": "O4_OSM_Utils",
+    "IMG": "O4_Imagery_Utils",
+    "TILE": "O4_Tile_Utils",
+    "OVL": "O4_Overlay_Utils",
+}
+
+# The pod wires these itself (the overlay source is the pod's alone).
+POD_OWNED = ("custom_overlay_src", "custom_overlay_src_alternate")
+# Region intent: carried in the payload from the spec, never overridable.
+SPEC_OWNED = ("skip_converts",)
+
+
+def set_app_var(CFG, key, value):
+    """Set an app-level variable on the module that owns it, per
+    cfg_app_vars[key]["module"]. Modules are imported only when targeted."""
+    binding = CFG.cfg_app_vars[key].get("module")
+    if binding not in APP_MODULES:
+        raise KeyError("app variable %r has no owning module (binding %r)" % (key, binding))
+    import importlib
+    setattr(importlib.import_module(APP_MODULES[binding]), key, value)
+
+
+def apply_app_level(CFG, config, overrides, raw):
+    """skip_converts from the payload, then the pod's overrides. Everything
+    is validated and converted per the variable's declared type."""
+    # Refused for every task type: only ortho builds a Tile from raw, but an
+    # app-level key in any task's raw is a silent no-op worth failing loudly.
+    for k in raw:
+        if k in CFG.cfg_app_vars:
+            raise ValueError(
+                "%r is an app-level variable; app-level keys belong in the pod's overrides, not raw" % k
+            )
+    if not isinstance(config.get("skip_converts"), bool):
+        raise ValueError("config.skip_converts must be a bool, got %r" % (config.get("skip_converts"),))
+    set_app_var(CFG, "skip_converts", config["skip_converts"])
+    for k, v in overrides.items():
+        if k in POD_OWNED:
+            raise ValueError("app variable %r is wired by the pod and cannot be overridden" % k)
+        if k in SPEC_OWNED:
+            raise ValueError(
+                "app variable %r is region intent and belongs in the region spec, not the pod's overrides" % k
+            )
+        if k not in CFG.cfg_app_vars:
+            if k in CFG.cfg_vars:
+                raise KeyError(
+                    "%r is a tile-level variable, not an app-level one; it belongs in the spec's raw" % k
+                )
+            raise KeyError("unknown app-level variable %r in overrides" % k)
+        set_app_var(CFG, k, convert_raw(CFG.cfg_vars, k, v))
+
+
 def check(fn_name, result, none_is_success=False):
     """Ortho4XP's build functions return 0 on an internally handled failure
     and exit 0 regardless, so the return value is the only failure signal.
@@ -81,6 +136,16 @@ def main(out):
         # Both task types read X-Plane's Global Scenery. The variable lives in
         # O4_Overlay_Utils (O4_Cfg_Vars binds it to OVL), not in CFG.
         OVL.custom_overlay_src = inp["overlay_src"]
+
+        # App-level variables go to their owning modules before anything
+        # runs (the providers read some of them).
+        phase = "configure"
+        apply_app_level(CFG, config, inp.get("app_overrides") or {}, config.get("raw") or {})
+        sys.stderr.write(
+            "patches: %s for %s\n"
+            % ("present" if os.path.isdir(FNAMES.patch_dir(lat, lon)) else "none", inp["tile"])
+        )
+        sys.stderr.flush()
 
         phase = "initialize_providers"
         IMG.initialize_extents_dict()

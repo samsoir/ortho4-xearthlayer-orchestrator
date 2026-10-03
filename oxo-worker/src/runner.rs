@@ -9,6 +9,7 @@
 //! No timers live here: the loop task decides when to give up and calls
 //! [`TaskRun::kill_and_reap`].
 
+use std::collections::BTreeMap;
 use std::io;
 use std::process::Stdio;
 
@@ -25,6 +26,9 @@ pub struct RunnerInput {
     pub config: serde_json::Value,
     pub install_root: String,
     pub overlay_src: String,
+    /// Pod-level Ortho4XP app-variable overrides; strings end to end, in
+    /// deterministic order, converted by the runner like `raw`.
+    pub app_overrides: BTreeMap<String, String>,
 }
 
 /// What the runner reports, as the last non-empty stdout line.
@@ -201,6 +205,7 @@ mod tests {
             config: serde_json::json!({"zl": 16}),
             install_root: "/opt/o4xp".into(),
             overlay_src: "/xp/overlay".into(),
+            app_overrides: BTreeMap::new(),
         }
     }
 

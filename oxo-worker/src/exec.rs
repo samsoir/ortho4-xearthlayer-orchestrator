@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use crate::api::ClaimedTask;
@@ -28,7 +27,6 @@ pub const SCRATCH_SKELETON: [&str; 7] = [
 pub struct ExecPaths {
     pub scratch: PathBuf,
     pub content: PathBuf,
-    pub patches_link: PathBuf,
 }
 
 /// What `prepare` resolved, for the later steps.
@@ -45,12 +43,6 @@ pub enum PrepareError {
     TargetNotWritable { path: PathBuf, source: io::Error },
     #[error("bad tile {0:?}")]
     BadTile(String),
-    #[error("patches selector {0:?} is not a single path component")]
-    BadPatchesSet(String),
-    #[error("patches set {path} is not a directory")]
-    PatchesMissing { path: PathBuf },
-    #[error("patches link {path}: {source}")]
-    PatchesLink { path: PathBuf, source: io::Error },
     #[error("cannot create {path}: {source}")]
     CreateDir { path: PathBuf, source: io::Error },
 }
@@ -112,8 +104,7 @@ fn overlay_dir(root: &Path, block: &str) -> PathBuf {
     p
 }
 
-/// Prove the target writable, repoint the patches link, and pre-create the
-/// overlay block directory.
+/// Prove the target writable and pre-create the overlay block directory.
 pub fn prepare(task: &ClaimedTask, paths: &ExecPaths) -> Result<PreparedTask, PrepareError> {
     let root = target_root(task).ok_or(PrepareError::NoTargetRoot)?;
     let (lat, lon) =
@@ -127,13 +118,6 @@ pub fn prepare(task: &ClaimedTask, paths: &ExecPaths) -> Result<PreparedTask, Pr
             source,
         })?;
 
-    let patches = task
-        .config
-        .get("patches")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    set_patches_link(paths, patches)?;
-
     if is_overlay(task) {
         let dir = overlay_dir(&paths.scratch, &block_of(lat, lon));
         fs::create_dir_all(&dir).map_err(|source| PrepareError::CreateDir { path: dir, source })?;
@@ -141,49 +125,48 @@ pub fn prepare(task: &ClaimedTask, paths: &ExecPaths) -> Result<PreparedTask, Pr
     Ok(PreparedTask { target_root: root })
 }
 
-fn set_patches_link(paths: &ExecPaths, patches: Option<&str>) -> Result<(), PrepareError> {
-    let link = &paths.patches_link;
-    let err = |source| PrepareError::PatchesLink {
-        path: link.clone(),
-        source,
-    };
-    match patches {
-        Some(set) => {
-            let mut comps = Path::new(set).components();
-            let single = matches!(
-                (comps.next(), comps.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            );
-            if !single || set.contains('/') {
-                return Err(PrepareError::BadPatchesSet(set.to_string()));
-            }
-            let dest = paths.content.join("patches").join(set);
-            if !dest.is_dir() {
-                return Err(PrepareError::PatchesMissing { path: dest });
-            }
-            let mut tmp_name = link.file_name().unwrap_or_default().to_os_string();
-            tmp_name.push(format!(".new-{}", std::process::id()));
-            let tmp = link.with_file_name(tmp_name);
-            let _ = fs::remove_file(&tmp);
-            symlink(&dest, &tmp).map_err(err)?;
-            fs::rename(&tmp, link).map_err(|e| {
-                let _ = fs::remove_file(&tmp);
-                err(e)
-            })
+/// Extensions that never ship, wherever they sit (the XEL deliverable carries
+/// no imagery; the consumer streams it).
+const NEVER_SHIPPED: [&str; 3] = ["jpg", "jpeg", "dds"];
+
+fn never_shipped(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| NEVER_SHIPPED.iter().any(|n| e.eq_ignore_ascii_case(n)))
+}
+
+/// Does a top-level entry of the tile directory belong to the ship-set?
+/// `Earth nav data/**` (DSF), `terrain/**` (`.ter`) and `textures/*.png`
+/// (the water masks). Everything else perishes with scratch.
+fn ships(rel: &Path, is_dir: bool) -> bool {
+    let mut comps = rel
+        .components()
+        .map(|c| c.as_os_str().to_str().unwrap_or(""));
+    match (comps.next(), comps.next()) {
+        (Some("Earth nav data" | "terrain"), _) => !never_shipped(rel),
+        (Some("textures"), None) => is_dir,
+        (Some("textures"), Some(_)) => {
+            !is_dir
+                && rel
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("png"))
         }
-        None => match fs::remove_file(link) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(err(e)),
-            _ => Ok(()),
-        },
+        _ => false,
     }
 }
 
-fn copy_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+fn copy_recursive(src: &Path, dest: &Path, rel_dir: &Path) -> io::Result<()> {
     if src.is_dir() {
         fs::create_dir(dest)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
-            copy_recursive(&entry.path(), &dest.join(entry.file_name()))?;
+            let name = entry.file_name();
+            let rel = rel_dir.join(&name);
+            let path = entry.path();
+            if !ships(&rel, path.is_dir()) {
+                continue;
+            }
+            copy_recursive(&path, &dest.join(name), &rel)?;
         }
         Ok(())
     } else {
@@ -192,13 +175,14 @@ fn copy_recursive(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 /// First half of egress: copy `src` to a temporary name inside `dest_dir`
-/// (the same filesystem as the final path). Returns the temporary path;
+/// (the same filesystem as the final path). A directory `src` is filtered to
+/// the ship-set; a file is copied as is. Returns the temporary path;
 /// nothing under a final name exists yet. On failure the temporary is removed.
 pub fn stage(src: &Path, dest_dir: &Path, final_name: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(dest_dir)?;
     let tmp = dest_dir.join(format!(".oxo-tmp-{}-{final_name}", std::process::id()));
     remove_any(&tmp)?;
-    if let Err(e) = copy_recursive(src, &tmp) {
+    if let Err(e) = copy_recursive(src, &tmp, Path::new("")) {
         let _ = remove_any(&tmp);
         return Err(e);
     }
@@ -270,7 +254,7 @@ pub fn cleanup(scratch: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     use serde_json::json;
     use uuid::Uuid;
@@ -289,12 +273,9 @@ mod tests {
         let paths = ExecPaths {
             scratch: r.join("scratch"),
             content: r.join("content"),
-            patches_link: r.join("patches-active"),
         };
         let target = r.join("artifacts");
         fs::create_dir_all(&target).unwrap();
-        fs::create_dir_all(paths.content.join("patches/set-a")).unwrap();
-        fs::create_dir_all(paths.content.join("patches/set-b")).unwrap();
         cleanup(&paths.scratch).unwrap();
         Env {
             _d: d,
@@ -303,11 +284,8 @@ mod tests {
         }
     }
 
-    fn task(e: &Env, kind: &str, tile: &str, patches: Option<&str>) -> ClaimedTask {
-        let mut config = json!({"target_root": e.target});
-        if let Some(p) = patches {
-            config["patches"] = json!(p);
-        }
+    fn task(e: &Env, kind: &str, tile: &str) -> ClaimedTask {
+        let config = json!({"target_root": e.target});
         ClaimedTask {
             task_id: Uuid::nil(),
             job_id: Uuid::nil(),
@@ -354,7 +332,7 @@ mod tests {
         }
         let e = env();
         fs::set_permissions(&e.target, fs::Permissions::from_mode(0o555)).unwrap();
-        let r = prepare(&task(&e, "ortho", "+51+000", None), &e.paths);
+        let r = prepare(&task(&e, "ortho", "+51+000"), &e.paths);
         fs::set_permissions(&e.target, fs::Permissions::from_mode(0o755)).unwrap();
         match r {
             Err(PrepareError::TargetNotWritable { path, .. }) => assert_eq!(path, e.target),
@@ -367,7 +345,7 @@ mod tests {
         let e = env();
         let file = e.target.join("file");
         fs::write(&file, b"").unwrap();
-        let mut t = task(&e, "ortho", "+51+000", None);
+        let mut t = task(&e, "ortho", "+51+000");
         t.config["target_root"] = json!(file.join("sub"));
         assert!(matches!(
             prepare(&t, &e.paths),
@@ -376,55 +354,14 @@ mod tests {
     }
 
     #[test]
-    fn patch_selectors_that_escape_are_refused() {
-        let e = env();
-        for bad in ["../escape", "/etc", "a/b", ".", ".."] {
-            assert!(
-                matches!(
-                    prepare(&task(&e, "ortho", "+51+000", Some(bad)), &e.paths),
-                    Err(PrepareError::BadPatchesSet(_))
-                ),
-                "{bad}"
-            );
-        }
-        assert!(fs::symlink_metadata(&e.paths.patches_link).is_err());
-    }
-
-    #[test]
-    fn the_patches_link_never_vanishes_during_a_swap() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        let e = env();
-        prepare(&task(&e, "ortho", "+51+000", Some("set-a")), &e.paths).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let missing = Arc::new(AtomicBool::new(false));
-        let (link, s2, m2) = (e.paths.patches_link.clone(), stop.clone(), missing.clone());
-        let poller = std::thread::spawn(move || {
-            while !s2.load(Ordering::Relaxed) {
-                if fs::symlink_metadata(&link).is_err() {
-                    m2.store(true, Ordering::Relaxed);
-                }
-            }
-        });
-        for i in 0..200 {
-            let set = if i % 2 == 0 { "set-b" } else { "set-a" };
-            prepare(&task(&e, "ortho", "+51+000", Some(set)), &e.paths).unwrap();
-        }
-        stop.store(true, Ordering::Relaxed);
-        poller.join().unwrap();
-        assert!(!missing.load(Ordering::Relaxed), "link was absent mid-swap");
-    }
-
-    #[test]
     fn a_missing_target_is_refused_before_any_side_effect() {
         let e = env();
-        let mut t = task(&e, "overlay", "+51+000", Some("set-a"));
+        let mut t = task(&e, "overlay", "+51+000");
         t.config["target_root"] = json!(e.target.join("absent"));
         assert!(matches!(
             prepare(&t, &e.paths),
             Err(PrepareError::TargetNotWritable { .. })
         ));
-        assert!(fs::symlink_metadata(&e.paths.patches_link).is_err());
         assert!(!e
             .paths
             .scratch
@@ -435,50 +372,14 @@ mod tests {
     #[test]
     fn a_successful_probe_leaves_nothing_behind() {
         let e = env();
-        prepare(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
+        prepare(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
         assert!(names(&e.target).is_empty());
-    }
-
-    #[test]
-    fn the_patches_link_swaps_old_to_new_to_none() {
-        let e = env();
-        prepare(&task(&e, "ortho", "+51+000", Some("set-a")), &e.paths).unwrap();
-        assert_eq!(
-            fs::read_link(&e.paths.patches_link).unwrap(),
-            e.paths.content.join("patches/set-a")
-        );
-        prepare(&task(&e, "ortho", "+51+000", Some("set-b")), &e.paths).unwrap();
-        assert_eq!(
-            fs::read_link(&e.paths.patches_link).unwrap(),
-            e.paths.content.join("patches/set-b")
-        );
-        // no temporary link names survive
-        assert_eq!(
-            names(e.paths.patches_link.parent().unwrap())
-                .iter()
-                .filter(|n| n.starts_with("patches-active"))
-                .count(),
-            1
-        );
-        prepare(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
-        assert!(fs::symlink_metadata(&e.paths.patches_link).is_err());
-        // removing an absent link is fine
-        prepare(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
-    }
-
-    #[test]
-    fn an_unknown_patches_set_is_refused() {
-        let e = env();
-        assert!(matches!(
-            prepare(&task(&e, "ortho", "+51+000", Some("nope")), &e.paths),
-            Err(PrepareError::PatchesMissing { .. })
-        ));
     }
 
     #[test]
     fn overlay_prepare_precreates_the_block_dir_idempotently() {
         let e = env();
-        let t = task(&e, "overlay", "+51+000", None);
+        let t = task(&e, "overlay", "+51+000");
         prepare(&t, &e.paths).unwrap();
         prepare(&t, &e.paths).unwrap();
         assert!(e
@@ -486,7 +387,7 @@ mod tests {
             .scratch
             .join("yOrtho4XP_Overlays/Earth nav data/+50+000")
             .is_dir());
-        let o = task(&e, "ortho", "+51+000", None);
+        let o = task(&e, "ortho", "+51+000");
         cleanup(&e.paths.scratch).unwrap();
         prepare(&o, &e.paths).unwrap();
         assert!(names(&e.paths.scratch.join("yOrtho4XP_Overlays")).is_empty());
@@ -495,8 +396,18 @@ mod tests {
     fn fabricate_ortho(e: &Env) {
         let d = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
         fs::create_dir_all(d.join("Earth nav data/+50+000")).unwrap();
+        fs::create_dir_all(d.join("terrain")).unwrap();
+        fs::create_dir_all(d.join("textures")).unwrap();
+        // the ship-set
         fs::write(d.join("Earth nav data/+50+000/+51+000.dsf"), b"dsf").unwrap();
-        fs::write(d.join("+51+000.mesh"), b"m").unwrap();
+        fs::write(d.join("terrain/water_1.ter"), b"ter").unwrap();
+        fs::write(d.join("textures/mask_1.png"), b"png").unwrap();
+        // contaminants
+        fs::write(d.join("textures/foo.jpg"), b"x").unwrap();
+        fs::write(d.join("textures/bar.dds"), b"x").unwrap();
+        fs::write(d.join("Data+51+000.mesh"), b"m").unwrap();
+        fs::write(d.join("Ortho4XP_+51+000.cfg"), b"c").unwrap();
+        fs::write(d.join("Ortho4XP_+51+000.cfg.bak"), b"c").unwrap();
     }
 
     fn fabricate_overlay(e: &Env) {
@@ -517,19 +428,54 @@ mod tests {
     }
 
     #[test]
-    fn ortho_egress_copies_the_whole_directory_and_keeps_the_source() {
+    fn ortho_egress_ships_the_xel_tile_and_keeps_the_source() {
         let e = env();
         fabricate_ortho(&e);
-        egress(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
         assert_eq!(names(&e.target), ["zOrtho4XP_+51+000"]);
         let d = e.target.join("zOrtho4XP_+51+000");
-        assert_eq!(fs::read(d.join("+51+000.mesh")).unwrap(), b"m");
         assert_eq!(
             fs::read(d.join("Earth nav data/+50+000/+51+000.dsf")).unwrap(),
             b"dsf"
         );
+        assert_eq!(fs::read(d.join("terrain/water_1.ter")).unwrap(), b"ter");
+        assert_eq!(fs::read(d.join("textures/mask_1.png")).unwrap(), b"png");
         let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
-        assert_eq!(fs::read(src.join("+51+000.mesh")).unwrap(), b"m");
+        assert_eq!(fs::read(src.join("Data+51+000.mesh")).unwrap(), b"m");
+    }
+
+    #[test]
+    fn ortho_egress_withholds_jpegs() {
+        let e = env();
+        fabricate_ortho(&e);
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
+        assert!(!e.target.join("zOrtho4XP_+51+000/textures/foo.jpg").exists());
+    }
+
+    #[test]
+    fn ortho_egress_withholds_dds() {
+        let e = env();
+        fabricate_ortho(&e);
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
+        assert!(!e.target.join("zOrtho4XP_+51+000/textures/bar.dds").exists());
+    }
+
+    #[test]
+    fn ortho_egress_withholds_mesh_intermediates() {
+        let e = env();
+        fabricate_ortho(&e);
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
+        assert!(!e.target.join("zOrtho4XP_+51+000/Data+51+000.mesh").exists());
+    }
+
+    #[test]
+    fn ortho_egress_withholds_the_tile_cfg() {
+        let e = env();
+        fabricate_ortho(&e);
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
+        let d = e.target.join("zOrtho4XP_+51+000");
+        assert!(!d.join("Ortho4XP_+51+000.cfg").exists());
+        assert!(!d.join("Ortho4XP_+51+000.cfg.bak").exists());
     }
 
     #[test]
@@ -539,10 +485,11 @@ mod tests {
         let stale = e.target.join("zOrtho4XP_+51+000");
         fs::create_dir_all(&stale).unwrap();
         fs::write(stale.join("stale.txt"), b"old").unwrap();
-        fs::write(stale.join("+51+000.mesh"), b"old").unwrap();
-        egress(&task(&e, "ortho", "+51+000", None), &e.paths).unwrap();
+        fs::create_dir_all(stale.join("terrain")).unwrap();
+        fs::write(stale.join("terrain/water_1.ter"), b"old").unwrap();
+        egress(&task(&e, "ortho", "+51+000"), &e.paths).unwrap();
         assert!(!stale.join("stale.txt").exists());
-        assert_eq!(fs::read(stale.join("+51+000.mesh")).unwrap(), b"m");
+        assert_eq!(fs::read(stale.join("terrain/water_1.ter")).unwrap(), b"ter");
         no_temporaries(&e.target);
     }
 
@@ -553,7 +500,7 @@ mod tests {
         let d = e.target.join("yOrtho4XP_Overlays/Earth nav data/+50+000");
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("+51+000.dsf"), b"old").unwrap();
-        egress(&task(&e, "overlay", "+51+000", None), &e.paths).unwrap();
+        egress(&task(&e, "overlay", "+51+000"), &e.paths).unwrap();
         assert_eq!(names(&d), ["+51+000.dsf"]);
         assert_eq!(fs::read(d.join("+51+000.dsf")).unwrap(), b"ovl");
         let src = e
@@ -567,7 +514,7 @@ mod tests {
     fn a_missing_deliverable_is_a_typed_error() {
         let e = env();
         assert!(matches!(
-            egress(&task(&e, "ortho", "+51+000", None), &e.paths),
+            egress(&task(&e, "ortho", "+51+000"), &e.paths),
             Err(EgressError::Missing(_))
         ));
     }
@@ -581,9 +528,15 @@ mod tests {
         assert!(!e.target.join("zOrtho4XP_+51+000").exists());
         assert_eq!(tmp.parent().unwrap(), e.target);
         assert!(
-            src.join("+51+000.mesh").exists(),
+            src.join("terrain/water_1.ter").exists(),
             "stage must copy, not move"
         );
+        assert_eq!(
+            fs::read(tmp.join("terrain/water_1.ter")).unwrap(),
+            b"ter",
+            "stage applies the filter"
+        );
+        assert!(!tmp.join("Data+51+000.mesh").exists());
         commit(&tmp, &e.target.join("zOrtho4XP_+51+000")).unwrap();
         assert!(!tmp.exists());
         assert_eq!(names(&e.target), ["zOrtho4XP_+51+000"]);
@@ -594,10 +547,10 @@ mod tests {
         let e = env();
         fabricate_ortho(&e);
         let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
-        symlink("/nonexistent/oxo-dangling", src.join("zz-dangling")).unwrap();
+        symlink("/nonexistent/oxo-dangling", src.join("terrain/zz-dangling")).unwrap();
         assert!(stage(&src, &e.target, "zOrtho4XP_+51+000").is_err());
         no_temporaries(&e.target);
-        let r = egress(&task(&e, "ortho", "+51+000", None), &e.paths);
+        let r = egress(&task(&e, "ortho", "+51+000"), &e.paths);
         assert!(matches!(r, Err(EgressError::Io { .. })));
         assert!(names(&e.target).is_empty());
     }
@@ -613,12 +566,12 @@ mod tests {
         fs::create_dir_all(stale.join("locked")).unwrap();
         fs::write(stale.join("locked/f"), b"x").unwrap();
         fs::set_permissions(stale.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
-        let r = egress(&task(&e, "ortho", "+51+000", None), &e.paths);
+        let r = egress(&task(&e, "ortho", "+51+000"), &e.paths);
         fs::set_permissions(stale.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(r, Err(EgressError::Io { .. })));
         no_temporaries(&e.target);
         let src = e.paths.scratch.join("Tiles/zOrtho4XP_+51+000");
-        assert!(src.join("+51+000.mesh").exists());
+        assert!(src.join("terrain/water_1.ter").exists());
     }
 
     #[test]

@@ -33,6 +33,14 @@ spec:
         # recycle: clean scratch and take the next task. stop: one task, exit.
         - name: OXO_MODE
           value: "recycle"
+        # Operational tuning of Ortho4XP's app-level variables: a JSON object
+        # of variable name to STRING value, applied through each variable's
+        # owning module (design: docs/specs/2026-10-02-worker-pod-design.md,
+        # the "App-level Ortho4XP variables" decision). They live here, never in the region spec's
+        # raw keys, which the runner refuses. These are the operator's
+        # production values; empty string means no overrides.
+        - name: OXO_O4_APP_OVERRIDES
+          value: '{"max_download_slots":"2","max_convert_slots":"8","http_timeout":"10.0","max_connect_retries":"5","max_baddata_retries":"5","ovl_exclude_pol":"[0]","ovl_exclude_net":"[]"}'
         # Deliberately left to their defaults (see oxo-worker/src/config.rs):
         #   OXO_WORKER_NAME               (derived from the hostname)
         #   OXO_MIN_FREE_SCRATCH_BYTES    (8 GiB; a ZL16 floor, raise it for
@@ -57,6 +65,13 @@ spec:
         - name: content
           mountPath: /var/oxo/content
           readOnly: true
+        # Ortho4XP patches, always on: the image's Patches symlink points
+        # here. Block-nested layout, patches/<10° block>/<tile>/… (e.g.
+        # +50+000/+51+000), Ortho4XP's own, matched by coordinate;
+        # the runner logs "patches: present|none for <tile>" per task.
+        - name: patches
+          mountPath: /var/oxo/patches-active
+          readOnly: true
         # The mount path must equal the region spec's target_root so that
         # delivery lands where the operator expects.
         - name: artifacts
@@ -72,12 +87,22 @@ spec:
       hostPath:
         path: /EDIT/ME/oxo/dem          # EDIT ME
         type: DirectoryOrCreate
-    # X-Plane data (custom_overlay_src) and patches/<set>/..., read-only.
+    # X-Plane data (custom_overlay_src), read-only.
     - name: content
       hostPath:
         path: /EDIT/ME/oxo/content      # EDIT ME
         type: Directory
-    # The deliverable.
+    # Patches tree, read-only: block-nested layout patches/<10° block>/<tile>/…
+    # (e.g. +50+000/+51+000; Ortho4XP's own), matched by coordinate, always on.
+    # An empty directory simply means no patches, but it must EXIST before
+    # `kube play` (type: Directory).
+    - name: patches
+      hostPath:
+        path: /EDIT/ME/oxo/patches      # EDIT ME
+        type: Directory
+    # The deliverable: per tile ~64 MB (DSF, terrain descriptors, mask PNGs)
+    # under skip_converts; jpegs and intermediates perish with scratch
+    # (pod-contract, "Addendum: the deliverable under skip_converts").
     - name: artifacts
       hostPath:
         path: /EDIT/ME/oxo/artifacts    # EDIT ME

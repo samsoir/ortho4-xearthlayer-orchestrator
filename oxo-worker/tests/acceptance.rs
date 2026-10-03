@@ -130,8 +130,8 @@ case "$line" in
   *'"task_type":"overlay"'*)
     for d in "{s}/yOrtho4XP_Overlays/Earth nav data"/*; do echo dsf > "$d/$tile.dsf"; done ;;
   *)
-    mkdir -p "{s}/Tiles/zOrtho4XP_$tile"
-    echo built > "{s}/Tiles/zOrtho4XP_$tile/tile.txt" ;;
+    mkdir -p "{s}/Tiles/zOrtho4XP_$tile/terrain"
+    echo built > "{s}/Tiles/zOrtho4XP_$tile/terrain/tile.ter" ;;
 esac
 echo '{{"outcome":"ok"}}'"#
             ),
@@ -163,8 +163,6 @@ echo '{{"outcome":"ok"}}'"#
             &self.scratch().to_string_lossy(),
             "--content-dir",
             &content.to_string_lossy(),
-            "--patches-link",
-            &self.dir.path().join("patches-active").to_string_lossy(),
             "--runner",
             runner,
         ])
@@ -235,7 +233,9 @@ async fn stop_worker_runs_once(world: &mut WorkerWorld) {
 #[then("every task's artifact is delivered under the region's target root")]
 fn artifacts_delivered(world: &mut WorkerWorld) {
     for tile in TILES {
-        let ortho = world.target().join(format!("zOrtho4XP_{tile}/tile.txt"));
+        let ortho = world
+            .target()
+            .join(format!("zOrtho4XP_{tile}/terrain/tile.ter"));
         assert_eq!(
             std::fs::read_to_string(&ortho)
                 .unwrap_or_else(|e| panic!("{}: {e}", ortho.display()))

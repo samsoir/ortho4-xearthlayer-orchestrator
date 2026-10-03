@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use clap::{Parser, ValueEnum};
 
 /// What the pod does after a task's cleanup: take the next task in the
@@ -65,13 +67,41 @@ pub struct Config {
     )]
     pub overlay_src: String,
 
-    /// Symlink naming the active patches directory.
-    #[arg(long, default_value = "/var/oxo/patches-active")]
-    pub patches_link: String,
+    /// Pod-level overrides of Ortho4XP's app-level variables: a JSON object
+    /// of variable names to string values, applied by the runner to each
+    /// variable's owning module. Shape-checked here; names and values are
+    /// checked by the runner against Ortho4XP's own variable table.
+    #[arg(
+        long,
+        env = "OXO_O4_APP_OVERRIDES",
+        default_value = "{}",
+        value_parser = parse_app_overrides
+    )]
+    pub o4_app_overrides: BTreeMap<String, String>,
 
     /// The Ortho4XP runner script.
     #[arg(long, default_value = "/opt/oxo/oxo_o4_runner.py")]
     pub runner: String,
+}
+
+/// A JSON object whose values are all strings; anything else refuses
+/// startup rather than failing every task later.
+fn parse_app_overrides(raw: &str) -> Result<BTreeMap<String, String>, String> {
+    // A templated-but-unset env var arrives empty: that means no overrides.
+    if raw.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
+    let serde_json::Value::Object(map) = value else {
+        return Err("must be a JSON object of variable names to string values".into());
+    };
+    map.into_iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::String(s) => Ok((k, s)),
+            other => Err(format!("value for {k:?} must be a string, got {other}")),
+        })
+        .collect()
 }
 
 impl Config {
@@ -115,7 +145,7 @@ mod tests {
         assert_eq!(c.scratch_dir, "/var/oxo/scratch");
         assert_eq!(c.content_dir, "/var/oxo/content");
         assert_eq!(c.overlay_src, "/var/oxo/content/xplane");
-        assert_eq!(c.patches_link, "/var/oxo/patches-active");
+        assert!(c.o4_app_overrides.is_empty());
         assert_eq!(c.runner, "/opt/oxo/oxo_o4_runner.py");
     }
 
@@ -143,5 +173,53 @@ mod tests {
     fn the_worker_name_is_never_empty_without_a_flag() {
         let c = parse(&["--control-plane-url", "u"]).expect("parse");
         assert!(!c.worker_name().is_empty());
+    }
+
+    #[test]
+    fn app_overrides_accept_a_json_object_of_strings() {
+        let c = parse(&[
+            "--control-plane-url",
+            "u",
+            "--o4-app-overrides",
+            r#"{"max_download_slots":"2","http_timeout":"7.5"}"#,
+        ])
+        .expect("parse");
+        assert_eq!(c.o4_app_overrides["max_download_slots"], "2");
+        assert_eq!(c.o4_app_overrides["http_timeout"], "7.5");
+        assert_eq!(c.o4_app_overrides.len(), 2);
+    }
+
+    #[test]
+    fn app_overrides_refuse_a_non_object() {
+        for bad in ["[]", "\"x\"", "3", "not json"] {
+            assert!(
+                parse(&["--control-plane-url", "u", "--o4-app-overrides", bad]).is_err(),
+                "{bad:?} must refuse startup"
+            );
+        }
+    }
+
+    #[test]
+    fn app_overrides_refuse_non_string_values() {
+        for bad in [
+            r#"{"a":2}"#,
+            r#"{"a":true}"#,
+            r#"{"a":null}"#,
+            r#"{"a":["1"]}"#,
+        ] {
+            assert!(
+                parse(&["--control-plane-url", "u", "--o4-app-overrides", bad]).is_err(),
+                "{bad:?} must refuse startup"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_app_overrides_mean_none() {
+        for empty in ["", "  "] {
+            let c =
+                parse(&["--control-plane-url", "u", "--o4-app-overrides", empty]).expect("parse");
+            assert!(c.o4_app_overrides.is_empty());
+        }
     }
 }

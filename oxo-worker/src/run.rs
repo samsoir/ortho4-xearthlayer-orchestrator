@@ -79,7 +79,6 @@ pub async fn run(config: &Config, client: &ControlPlane, deps: Deps) -> ExitReas
     let paths = ExecPaths {
         scratch: PathBuf::from(&config.scratch_dir),
         content: PathBuf::from(&config.content_dir),
-        patches_link: PathBuf::from(&config.patches_link),
     };
     for (what, dir) in [("scratch", &paths.scratch), ("content", &paths.content)] {
         if !dir.is_dir() {
@@ -155,6 +154,7 @@ async fn work(
         config: task.config.clone(),
         install_root: config.install_root.clone(),
         overlay_src: config.overlay_src.clone(),
+        app_overrides: config.o4_app_overrides.clone(),
     };
     let mut run = match runner::run_task(&config.runner, &input).await {
         Ok(run) => run,

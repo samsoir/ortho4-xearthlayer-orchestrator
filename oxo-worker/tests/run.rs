@@ -74,8 +74,8 @@ impl Env {
                 r#"read -r line
 tile=$(printf '%s' "$line" | sed 's/.*"tile":"\([^"]*\)".*/\1/')
 ls "{s}/Tiles" | wc -l >> "{log}"
-mkdir -p "{s}/Tiles/zOrtho4XP_$tile"
-echo built > "{s}/Tiles/zOrtho4XP_$tile/tile.txt"
+mkdir -p "{s}/Tiles/zOrtho4XP_$tile/terrain"
+echo built > "{s}/Tiles/zOrtho4XP_$tile/terrain/tile.ter"
 echo '{{"outcome":"ok"}}'"#
             ),
         )
@@ -99,8 +99,6 @@ echo '{{"outcome":"ok"}}'"#
             &self.scratch().to_string_lossy(),
             "--content-dir",
             &content.to_string_lossy(),
-            "--patches-link",
-            &self.root().join("patches-active").to_string_lossy(),
             "--runner",
             runner,
         ])
@@ -191,7 +189,9 @@ async fn a_recycle_worker_drains_a_two_task_job() {
     worker.abort();
 
     for tile in ["+50-002", "+51-002"] {
-        let f = env.target().join(format!("zOrtho4XP_{tile}/tile.txt"));
+        let f = env
+            .target()
+            .join(format!("zOrtho4XP_{tile}/terrain/tile.ter"));
         assert_eq!(std::fs::read_to_string(f).unwrap().trim(), "built");
     }
     let log = std::fs::read_to_string(env.root().join("leftovers.log")).unwrap();
@@ -389,8 +389,8 @@ async fn a_slow_stdout_drain_never_turns_success_into_failure() {
         "slow.sh",
         &format!(
             r#"read -r line
-mkdir -p "{s}/Tiles/zOrtho4XP_+50-002"
-echo built > "{s}/Tiles/zOrtho4XP_+50-002/tile.txt"
+mkdir -p "{s}/Tiles/zOrtho4XP_+50-002/terrain"
+echo built > "{s}/Tiles/zOrtho4XP_+50-002/terrain/tile.ter"
 sleep 0.3 &
 echo '{{"outcome":"ok"}}'"#
         ),
@@ -400,4 +400,30 @@ echo '{{"outcome":"ok"}}'"#
     d.heartbeat_interval = Duration::from_millis(5);
     assert_eq!(run(&config, &env.client, d).await, ExitReason::TaskDone);
     assert_eq!(env.job_state().await["state"], "complete");
+}
+
+#[tokio::test]
+async fn pod_level_app_overrides_reach_the_runner_input() {
+    let env = env_with(|s| s).await;
+    let seen = env.root().join("seen.log");
+    let runner = env.script(
+        "record.sh",
+        &format!(
+            r#"read -r line; echo "$line" >> "{}"; echo '{{"outcome":"ok"}}'"#,
+            seen.display()
+        ),
+    );
+    let mut config = env.config(&runner, "stop", 0);
+    config
+        .o4_app_overrides
+        .insert("max_download_slots".into(), "2".into());
+    assert_eq!(
+        run(&config, &env.client, deps(u64::MAX)).await,
+        ExitReason::TaskDone
+    );
+    let line = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        line.contains(r#""app_overrides":{"max_download_slots":"2"}"#),
+        "{line}"
+    );
 }

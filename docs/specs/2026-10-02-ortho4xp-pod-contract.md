@@ -189,3 +189,31 @@ egress code):
   correction (the `OVL` module binding) implemented in the runner.
 - `worker/Containerfile`, `worker/README.md` — the image these runs used,
   including the spike-driven `tk` addition and the gdal pin deviation.
+
+## Addendum: the deliverable under skip_converts (2026-10-02)
+
+Probed after the operator-conventions ruling: the run-2 build directory's
+`build_tile` products were removed (mesh/poly/alt intermediates and the
+cached `Orthophotos/` jpegs kept), `TILE.skip_converts = True` set on its
+owning module, and `build_tile` re-run alone in a fresh container over the
+preserved volumes.
+
+- **`build_tile` took 37.8 s** (against 276.9 s with conversion) over
+  cached source jpegs — the DDS conversion was the bulk of the phase.
+- **The build directory contains no jpegs and no DDS** under
+  `skip_converts=True`; source jpegs stay in `Orthophotos/` (unchanged at
+  743,412,712 B).
+- **Ship** (the XEL tile, 64,027,287 B total):
+  - `Earth nav data/+50+000/+51+000.dsf` — 62,910,971 B (this rebuild's
+    DSF; run 2's was 55,569,820 B — DSF size varies run to run)
+  - `terrain/*.ter` — 500 files, 71,886 B
+  - `textures/*.png` — 50 files, 1,044,430 B: the water-mask textures the
+    sea-overlay `.ter` descriptors reference. **The masks live in
+    `textures/`**, which is the fact the egress filter needs.
+- **Perish** (dies with the scratch wipe):
+  - `Data+51+000.{mesh,alt,node,poly,apt}` — 171,080,857 B of build
+    intermediates
+  - `Ortho4XP_+51+000.cfg` and `.cfg.bak` — the tile config snapshot
+  - everything under `Orthophotos/`, `OSM_data/`, `Masks/`, `tmp/`
+- The deliverable is therefore ~64 MB instead of ~2.6 GiB per ZL16 tile,
+  and the artifacts volume carries only what XEL consumes.

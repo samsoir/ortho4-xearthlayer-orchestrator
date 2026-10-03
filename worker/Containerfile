@@ -27,7 +27,7 @@ RUN grep -v '^gdal==' /opt/ortho4xp/requirements.txt > /tmp/requirements-no-gdal
 # The install-relative directories Ortho4XP writes are not configurable
 # (O4_File_Names.py resolves them against the cwd), so the image bakes
 # the arrangement: working dirs live on the scratch mount, elevation on
-# the DEM cache, patches behind a supervisor-controlled indirection.
+# the DEM cache, patches a static read-only mount.
 RUN set -eux; \
     mkdir -p /var/oxo/scratch /var/oxo/dem /var/oxo/content; \
     cd /opt/ortho4xp; \
