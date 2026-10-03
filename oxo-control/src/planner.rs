@@ -37,8 +37,6 @@ struct WorkerPayload<'a> {
     zoom: u8,
     raw: &'a BTreeMap<String, String>,
     target_root: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    patches: Option<&'a str>,
 }
 
 fn compose_payload(spec: &RegionSpec) -> Result<String, PlanError> {
@@ -49,7 +47,6 @@ fn compose_payload(spec: &RegionSpec) -> Result<String, PlanError> {
         zoom: parameters.zoom,
         raw: &parameters.raw,
         target_root: spec.target.root.to_string_lossy().into_owned(),
-        patches: parameters.patches.as_deref(),
     })
     .map_err(|error| PlanError::Payload(error.to_string()))
 }
@@ -121,7 +118,7 @@ mod tests {
                 provider: "BI".to_string(),
                 zoom: 16,
                 include_overlays,
-                patches: None,
+                skip_converts: true,
                 raw: BTreeMap::new(),
             },
             target: TargetLocation {
@@ -221,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_is_pinned_byte_for_byte_without_patches() {
+    fn the_payload_is_pinned_byte_for_byte() {
         let mut s = spec(&[(50, -2)], false);
         s.parameters.provider = "GO2".to_string();
         s.parameters.raw.insert("zl_b".to_string(), "2".to_string());
@@ -230,18 +227,6 @@ mod tests {
         assert_eq!(
             job.worker_payload,
             r#"{"v":1,"provider":"GO2","zoom":16,"raw":{"zl_a":"1","zl_b":"2"},"target_root":"/srv/oxo/artifacts/NA"}"#
-        );
-    }
-
-    #[test]
-    fn the_payload_is_pinned_byte_for_byte_with_patches_and_empty_raw() {
-        let mut s = spec(&[(50, -2)], false);
-        s.parameters.provider = "GO2".to_string();
-        s.parameters.patches = Some("na-airports".to_string());
-        let job = plan(&s).expect("plan");
-        assert_eq!(
-            job.worker_payload,
-            r#"{"v":1,"provider":"GO2","zoom":16,"raw":{},"target_root":"/srv/oxo/artifacts/NA","patches":"na-airports"}"#
         );
     }
 }

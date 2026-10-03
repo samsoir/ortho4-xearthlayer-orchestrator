@@ -36,16 +36,6 @@ pub enum ValidationError {
         key: String,
         curated_field: &'static str,
     },
-    EmptyPatches,
-    PatchesNotASingleComponent {
-        value: String,
-    },
-    PatchesReservedName {
-        value: String,
-    },
-    InvalidPatchesSelector {
-        value: String,
-    },
     MalformedRawKey {
         key: String,
         reason: &'static str,
@@ -95,22 +85,6 @@ impl fmt::Display for ValidationError {
                 "raw override {key:?} is owned by the curated field \
                  {curated_field:?}; set {curated_field} instead of \
                  shadowing it"
-            ),
-            Self::EmptyPatches => write!(f, "patches selector is empty"),
-            Self::PatchesNotASingleComponent { value } => write!(
-                f,
-                "patches selector {value:?} must be a single path component: \
-                 it may not contain '/' or '\\'"
-            ),
-            Self::PatchesReservedName { value } => write!(
-                f,
-                "patches selector {value:?} is a relative path reference, not \
-                 a directory name"
-            ),
-            Self::InvalidPatchesSelector { value } => write!(
-                f,
-                "patches selector {value:?} is malformed: expected only \
-                 A-Z, a-z, 0-9, '.', '_' and '-'"
             ),
             Self::MalformedRawKey { key, reason } => {
                 write!(
@@ -252,10 +226,6 @@ pub(crate) fn validate_parameters(
         });
     }
 
-    if let Some(selector) = &parameters.patches {
-        validate_patches_selector(selector, errors);
-    }
-
     for &(key, curated_field) in RESERVED_RAW_KEYS {
         if parameters.raw.contains_key(key) {
             errors.push(ValidationError::ReservedRawKey {
@@ -266,27 +236,6 @@ pub(crate) fn validate_parameters(
     }
 
     validate_raw_entries(&parameters.raw, errors);
-}
-
-/// Validate the patches selector. It names a subdirectory of the
-/// deployment's patches tree, so it must not be able to leave that tree:
-/// one path component, never `.` or `..`, drawn from a conservative set.
-/// The rules are checked in that order and are mutually exclusive, so one
-/// bad selector yields one fault.
-fn validate_patches_selector(selector: &str, errors: &mut Vec<ValidationError>) {
-    let value = selector.to_string();
-    if selector.is_empty() {
-        errors.push(ValidationError::EmptyPatches);
-    } else if selector.contains(['/', '\\']) {
-        errors.push(ValidationError::PatchesNotASingleComponent { value });
-    } else if selector == "." || selector == ".." {
-        errors.push(ValidationError::PatchesReservedName { value });
-    } else if !selector
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        errors.push(ValidationError::InvalidPatchesSelector { value });
-    }
 }
 
 /// Check that every raw override can survive being written into an
@@ -548,25 +497,6 @@ mod tests {
                 },
                 "raw override \"default_zl\" is owned by the curated field \"zoom\"",
             ),
-            (ValidationError::EmptyPatches, "patches selector is empty"),
-            (
-                ValidationError::PatchesNotASingleComponent {
-                    value: "a/b".to_string(),
-                },
-                "patches selector \"a/b\" must be a single path component",
-            ),
-            (
-                ValidationError::PatchesReservedName {
-                    value: "..".to_string(),
-                },
-                "patches selector \"..\" is a relative path reference",
-            ),
-            (
-                ValidationError::InvalidPatchesSelector {
-                    value: "a b".to_string(),
-                },
-                "patches selector \"a b\" is malformed",
-            ),
             (
                 ValidationError::MalformedRawKey {
                     key: String::new(),
@@ -620,10 +550,6 @@ mod tests {
             ValidationError::EmptyProviderCode => "EmptyProviderCode",
             ValidationError::InvalidProviderCode { .. } => "InvalidProviderCode",
             ValidationError::ReservedRawKey { .. } => "ReservedRawKey",
-            ValidationError::EmptyPatches => "EmptyPatches",
-            ValidationError::PatchesNotASingleComponent { .. } => "PatchesNotASingleComponent",
-            ValidationError::PatchesReservedName { .. } => "PatchesReservedName",
-            ValidationError::InvalidPatchesSelector { .. } => "InvalidPatchesSelector",
             ValidationError::MalformedRawKey { .. } => "MalformedRawKey",
             ValidationError::MalformedRawValue { .. } => "MalformedRawValue",
             ValidationError::EmptyName => "EmptyName",
@@ -645,7 +571,7 @@ mod tests {
         names.dedup();
         assert_eq!(
             names.len(),
-            20,
+            16,
             "every ValidationError variant needs a row: {names:?}"
         );
 
@@ -803,7 +729,7 @@ mod tests {
             provider: "BI".to_string(),
             zoom: 16,
             include_overlays: false,
-            patches: None,
+            skip_converts: true,
             raw: BTreeMap::new(),
         }
     }
@@ -846,89 +772,6 @@ mod tests {
             p.provider = code.to_string();
             validate_parameters(&p, &mut errors);
             assert!(errors.is_empty(), "{code} rejected: {errors:?}");
-        }
-    }
-
-    fn patches_errors(selector: &str) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-        let mut p = parameters();
-        p.patches = Some(selector.to_string());
-        validate_parameters(&p, &mut errors);
-        errors
-    }
-
-    #[test]
-    fn valid_patches_selectors_are_accepted() {
-        for selector in ["uk-fixes", "A_b.c-1", "v1.2", "..a", "a.."] {
-            let errors = patches_errors(selector);
-            assert!(errors.is_empty(), "{selector} rejected: {errors:?}");
-        }
-    }
-
-    #[test]
-    fn an_empty_patches_selector_is_a_fault() {
-        let errors = patches_errors("");
-        assert_eq!(errors, vec![ValidationError::EmptyPatches]);
-        assert_eq!(errors[0].to_string(), "patches selector is empty");
-    }
-
-    #[test]
-    fn a_patches_selector_with_a_path_separator_is_a_fault() {
-        for selector in ["a/b", "a\\b", "/abs"] {
-            let errors = patches_errors(selector);
-            assert_eq!(
-                errors,
-                vec![ValidationError::PatchesNotASingleComponent {
-                    value: selector.to_string()
-                }]
-            );
-            assert_eq!(
-                errors[0].to_string(),
-                format!(
-                    "patches selector {selector:?} must be a single path component: \
-                     it may not contain '/' or '\\'"
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn dot_and_dot_dot_are_not_patches_selectors() {
-        for selector in [".", ".."] {
-            let errors = patches_errors(selector);
-            assert_eq!(
-                errors,
-                vec![ValidationError::PatchesReservedName {
-                    value: selector.to_string()
-                }]
-            );
-            assert_eq!(
-                errors[0].to_string(),
-                format!(
-                    "patches selector {selector:?} is a relative path reference, not \
-                     a directory name"
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn a_patches_selector_outside_the_character_set_is_a_fault() {
-        for selector in ["a b", "caf\u{e9}", "a:b", "a\nb"] {
-            let errors = patches_errors(selector);
-            assert_eq!(
-                errors,
-                vec![ValidationError::InvalidPatchesSelector {
-                    value: selector.to_string()
-                }]
-            );
-            assert_eq!(
-                errors[0].to_string(),
-                format!(
-                    "patches selector {selector:?} is malformed: expected only \
-                     A-Z, a-z, 0-9, '.', '_' and '-'"
-                )
-            );
         }
     }
 

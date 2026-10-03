@@ -34,6 +34,10 @@ pub const PROVIDER_CODE_MAX_LEN: usize = 64;
 pub const RESERVED_RAW_KEYS: &[(&str, &str)] =
     &[("default_website", "provider"), ("default_zl", "zoom")];
 
+fn default_true() -> bool {
+    true
+}
+
 /// Production parameters for a region. One set per region — parameters do
 /// not vary per tile, and a region needing mixed zoom levels is expressed
 /// as more than one specification.
@@ -52,11 +56,12 @@ pub struct ProductionParameters {
     /// than a degraded mode.
     #[serde(default)]
     pub include_overlays: bool,
-    /// Optional name selecting a subdirectory of the deployment's patches
-    /// tree. A single path component of `A-Z a-z 0-9 . _ -`; whether that
-    /// subdirectory exists is environmental, so it is not checked here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patches: Option<String>,
+    /// Whether the worker skips Ortho4XP's convert step, the XEL invariant:
+    /// the deliverable is the DSF and terrain, not converted textures.
+    /// Defaults to `true`; `false` is a per-region escape hatch. Always
+    /// serialised, because the value is meaningful in both states.
+    #[serde(default = "default_true")]
+    pub skip_converts: bool,
     /// Ortho4XP tile-configuration keys passed through untouched, so that
     /// no tuning is unreachable.
     #[serde(default)]
@@ -96,22 +101,21 @@ cover_airports_with_highres = "ICAO"
     }
 
     #[test]
-    fn patches_defaults_to_none_so_existing_specifications_stay_valid() {
+    fn skip_converts_defaults_to_true_so_existing_specifications_gain_the_xel_invariant() {
         let parameters: ProductionParameters =
             toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
-        assert_eq!(parameters.patches, None);
+        assert!(parameters.skip_converts);
     }
 
     #[test]
-    fn patches_round_trips_through_toml_ahead_of_the_raw_table() {
+    fn an_explicit_false_skip_converts_round_trips_ahead_of_the_raw_table() {
         let mut parameters: ProductionParameters =
-            toml::from_str("provider = \"BI\"\nzoom = 16\npatches = \"uk-fixes\"\n")
-                .expect("parse");
-        assert_eq!(parameters.patches.as_deref(), Some("uk-fixes"));
+            toml::from_str("provider = \"BI\"\nzoom = 16\nskip_converts = false\n").expect("parse");
+        assert!(!parameters.skip_converts);
         parameters.raw.insert("a".to_string(), "b".to_string());
         let text = toml::to_string(&parameters).expect("serialise");
         assert!(
-            text.find("patches").unwrap() < text.find("[raw]").unwrap(),
+            text.find("skip_converts = false").unwrap() < text.find("[raw]").unwrap(),
             "{text}"
         );
         assert_eq!(
@@ -121,10 +125,21 @@ cover_airports_with_highres = "ICAO"
     }
 
     #[test]
-    fn an_absent_patches_selector_is_not_serialised() {
+    fn skip_converts_is_serialised_in_both_states() {
         let parameters: ProductionParameters =
             toml::from_str("provider = \"BI\"\nzoom = 16\n").expect("parse");
-        assert!(!toml::to_string(&parameters).unwrap().contains("patches"));
+        assert!(toml::to_string(&parameters)
+            .unwrap()
+            .contains("skip_converts = true"));
+    }
+
+    #[test]
+    fn a_specification_still_naming_patches_is_rejected_loudly() {
+        let error = toml::from_str::<ProductionParameters>(
+            "provider = \"BI\"\nzoom = 16\npatches = \"x\"\n",
+        )
+        .expect_err("the selector is gone");
+        assert!(error.to_string().contains("patches"), "{error}");
     }
 
     #[test]
