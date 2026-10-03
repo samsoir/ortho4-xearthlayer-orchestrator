@@ -2,4 +2,5 @@
 
 pub mod api;
 pub mod config;
+pub mod exec;
 pub mod runner;

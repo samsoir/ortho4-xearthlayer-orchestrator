@@ -24,3 +24,4 @@ oxo-tasks = { path = "../oxo-tasks" }
 axum = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
