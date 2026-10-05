@@ -292,6 +292,7 @@ boundaries that principle produces here.
 | Job server | Durable task state, lease/claim/heartbeat/expiry, retry accounting, region-completion gate | A persistence adapter |
 | Control plane | Atomize a spec into tasks, serve the claim API, own the pod spec, inject config, expose throughput | Region spec, job-server port |
 | Worker pod | Self-init, capacity check, tile production, egress, cleanup, recycle/stop | Injected config, OXO API |
+| Operator console (`oxo-console`) | Server-rendered operator views; holds operator sessions and nothing else. **Added 2026-10-04** by the operator interface design | OXO API |
 
 **The job-server role is separated from the control plane by an
 explicit port.** Queue persistence is a trait with lease, claim, retry
@@ -303,6 +304,12 @@ hard dependency of the v1 deployment, not of the design.
 through the OXO API. This keeps the pod thin, keeps store credentials
 out of workers, keeps the adapter swappable, and gives acceptance
 tests a far better surface than a broker protocol.
+
+**Every state change is authenticated (amended 2026-10-04).** A bearer
+token is required for any operation that changes production state, by
+worker and operator alike; reads stay open on the trusted network. The
+operator console is an API client like the workers, not a second path
+to the store. See the [operator interface design](2026-10-04-operator-interface-design.md).
 
 ## Decisions
 
@@ -338,7 +345,7 @@ implementation cycle.
 | 2 | Job server: port and Postgres adapter | Task lifecycle state machine, lease/heartbeat/expiry, retry policy and accounting, region-completion gate across both task types, Postgres adapter behind the port. |
 | 3 | Control plane: planner and claim API | Atomize a specification into per-tile ortho and overlay tasks — up to 2N tasks from N tiles, overlay tasks only when the specification asks for them — serve claim/heartbeat/complete/fail, drive lease expiry, expose the throughput signal. **Amended 2026-10-02:** configuration injection and pod-spec ownership moved to sub-project 4 — spike 0 had not run and there was no worker image for a pod spec to describe, so designing either here would have been invention. See the control plane design document. |
 | 4 | Ortho4XP worker pod | Image, self-initialization, capacity check, ortho production and overlay extraction, artifact egress, cleanup, recycle and stop modes. Must create the shared overlay destination directory idempotently. **Amended 2026-10-02:** also owns the pod spec and the configuration-injection surface, moved from sub-project 3, so the image, the injection surface and the pod spec are designed against each other. |
-| 5 | Observability and operator interface | Telemetry export, failure policy and alerting, operator views in HTML5/CSS/JS to WCAG principles. |
+| 5 | Observability and operator interface | Telemetry export, failure policy and alerting, operator views in HTML5/CSS/JS to WCAG principles. **Amended 2026-10-04:** split into phases 5a (read-only console), 5b (authentication), 5c (job control), 5d (job creation) and 5e (telemetry and alerting), each with its own design, plan and implementation cycle, under the umbrella [operator interface design](2026-10-04-operator-interface-design.md). |
 
 Sequence: this document, then sub-project 1. Spike 0 is deferred
 rather than dropped -- its numbers are needed before the resource
