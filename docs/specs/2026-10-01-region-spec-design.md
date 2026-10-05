@@ -265,6 +265,7 @@ a property of one rule.
 | Serialization | TOML canonical; serde types reused for JSON | Human-authorable and diffable; one format, with the second representation falling out of the same types |
 | Tile set encoding | Array of canonical id strings | Greppable, line-diffable; an array of tables is neither |
 | CLI surface | `validate` and `show` only | Authoring belongs to the web interface; a half-measure here becomes a second path to maintain |
+| Region code shape | `A-Z`, `0-9` and `-`, at most 512 characters (**amended 2026-10-04**, was 16) | XEarthLayer's published codes (`NA-USA-MX-CENTRAL`, 17; `NA-CANADA-GREENLAND`, 19) must be usable verbatim, so no mapping exists between OXO codes and published codes. The original 16 had no recorded reason; 512 is far beyond anything typed as an identifier and still bounds garbage. Storage is `text`, and the code never becomes a path (`target.root` does) |
 
 ## Open decisions
 

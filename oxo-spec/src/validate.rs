@@ -406,7 +406,7 @@ pub(crate) fn validate_metadata(metadata: &Metadata, errors: &mut Vec<Validation
 }
 
 fn is_well_formed_region_code(code: &str) -> bool {
-    code.len() <= REGION_CODE_MAX_LEN
+    code.chars().count() <= REGION_CODE_MAX_LEN
         && code
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
@@ -518,7 +518,7 @@ mod tests {
                 ValidationError::InvalidRegionCode {
                     value: "na".to_string(),
                 },
-                "region code \"na\" is malformed: expected at most 16 characters",
+                "region code \"na\" is malformed: expected at most 512 characters",
             ),
             (
                 ValidationError::RevisionTooLow,
@@ -1253,14 +1253,32 @@ mod tests {
     }
 
     #[test]
-    fn the_region_code_length_ceiling_is_sixteen() {
+    fn xearthlayer_published_region_codes_are_accepted() {
+        for code in [
+            "SA-WEST",
+            "SA-EAST",
+            "NA-USA-MX-CENTRAL",
+            "NA-CANADA-GREENLAND",
+        ] {
+            let mut errors = Vec::new();
+            let mut m = metadata();
+            m.region_code = code.to_string();
+            validate_metadata(&m, &mut errors);
+            assert!(errors.is_empty(), "{code} rejected: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn the_region_code_length_ceiling_is_512_characters() {
+        assert_eq!(REGION_CODE_MAX_LEN, 512);
+
         let mut errors = Vec::new();
         let mut m = metadata();
         m.region_code = "A".repeat(REGION_CODE_MAX_LEN);
         validate_metadata(&m, &mut errors);
         assert!(
             errors.is_empty(),
-            "16 characters must be accepted: {errors:?}"
+            "512 characters must be accepted: {errors:?}"
         );
 
         let mut errors = Vec::new();
@@ -1271,6 +1289,20 @@ mod tests {
             errors,
             vec![ValidationError::InvalidRegionCode {
                 value: "A".repeat(REGION_CODE_MAX_LEN + 1)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_region_code_is_a_fault() {
+        let mut errors = Vec::new();
+        let mut m = metadata();
+        m.region_code = "EU-ÎLE".to_string();
+        validate_metadata(&m, &mut errors);
+        assert_eq!(
+            errors,
+            vec![ValidationError::InvalidRegionCode {
+                value: "EU-ÎLE".to_string()
             }]
         );
     }

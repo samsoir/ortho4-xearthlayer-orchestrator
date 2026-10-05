@@ -1,11 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-/// Longest accepted region code.
+/// Longest accepted region code, in characters.
+///
+/// Generous on purpose: long enough that descriptive codes such as
+/// XEarthLayer's `NA-USA-MX-CENTRAL` are used verbatim in both tools, with
+/// no mapping between them, while still bounding garbage input.
 ///
 /// Shared with the message that reports a rejection, so the bound and the
 /// text that explains it cannot drift apart, and so the later API and web
 /// interface enforce this bound rather than re-deriving one.
-pub const REGION_CODE_MAX_LEN: usize = 16;
+pub const REGION_CODE_MAX_LEN: usize = 512;
 
 /// Identifying information for a region.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,7 +17,7 @@ pub const REGION_CODE_MAX_LEN: usize = 16;
 pub struct Metadata {
     /// Human-readable region name.
     pub name: String,
-    /// Short region code, e.g. `NA` or `EU-1`.
+    /// Region code, e.g. `NA`, `EU-1` or `NA-USA-MX-CENTRAL`.
     pub region_code: String,
     /// Operator-set revision, starting at 1.
     pub revision: u32,
