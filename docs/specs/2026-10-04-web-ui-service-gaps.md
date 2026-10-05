@@ -29,10 +29,9 @@ The handoff's reading of the code is mostly right. Six corrections matter:
    `?region_code=&revision=` and returns a job id.
 4. **The worker-name collision is not the `"oxo-worker"` fallback.** In a
    pod, the hostname defaults to the pod's name, so every pod started from
-   the same YAML would report the same hostname, and the literal fallback
-   is never reached. (Kubernetes and Podman both default to this. It has
-   not been verified on the maison host: podman could not start a pod
-   there on 2026-10-04, see gap 3.) A suffix on "the shared default" cannot be detected; the fix is
+   the same YAML reports the same hostname, and the literal fallback is
+   never reached. (Verified 2026-10-04: a `podman kube play` pod named
+   `oxo-worker` reports hostname `oxo-worker`.) A suffix on "the shared default" cannot be detected; the fix is
    a per-boot unique id (gap 3).
 5. **The failure reason is persisted** (`tasks.last_failure`, written by
    `fail`), but the reaper never writes one, so a reclaimed task shows the
@@ -161,10 +160,7 @@ Feature: Attempt history
 
 The collision comes from the hostname, not from the literal fallback. A
 pod's hostname defaults to its pod name (`oxo-worker` in
-`deploy/worker-pod.yaml`). **Unverified here:** a check with
-`podman run --pod new:…` failed on 2026-10-04 because the pod's infra
-container could not mount its overlay ("no such device"). Confirm with
-`podman exec oxo-worker-worker hostname` once pods start again. The pod
+`deploy/worker-pod.yaml`), verified 2026-10-04 with `podman kube play`. The pod
 name is identical on every host running that YAML, and the worker cannot
 tell a shared hostname from a unique one, so the handoff's
 suffix-on-the-shared-default rule cannot work.
