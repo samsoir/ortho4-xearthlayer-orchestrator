@@ -177,10 +177,15 @@ framework and no build step:
   off while it is hidden, uses the `ETag` so an unchanged view costs a
   `304`, and maintains "updated n s ago". Polling, not SSE, is the live
   update mechanism (gap 13).
-- **Tile map.** A canvas layer over the server-rendered tile list: each
-  tile's body shows the ortho task's state and a bottom strip the overlay
-  task's. Clicking a tile opens the task panel. It is an enhancement only:
-  the list view carries the same information without JavaScript.
+- **Tile map.** Each tile's body shows the ortho task's state and a
+  bottom strip the overlay task's. Clicking a tile opens the task panel.
+  It is an enhancement only: the list view carries the same information
+  without JavaScript. **Amended 2026-10-06:** every map in the console
+  (this one and 5d's tile picker) is drawn with Mapbox GL JS over a Mapbox
+  **public** token the operator supplies in `oxo-console`'s configuration;
+  no key ships with OXO. Without a token, the console falls back to a
+  keyboard tile grid, and 5d keeps the `.txt` import as a full
+  alternative. See the [phase 5a design](2026-10-06-read-only-console-design.md).
 - **Selection.** Bulk selection for "Retry selected" (5c), and later the
   map tile picker (5d).
 
